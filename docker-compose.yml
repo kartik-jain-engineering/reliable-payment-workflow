@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: payment-workflow-postgres
+    environment:
+      POSTGRES_DB: payment_workflow
+      POSTGRES_USER: payment_workflow
+      POSTGRES_PASSWORD: payment_workflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - payment-workflow-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payment_workflow -d payment_workflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  payment-workflow-pgdata:

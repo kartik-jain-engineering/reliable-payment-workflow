@@ -1,0 +1,6 @@
+-- Initial schema migration.
+--
+-- Intentionally empty for this scaffolding iteration: no business tables
+-- exist yet. This migration establishes the Flyway migration pipeline
+-- (schema history table, locations, naming convention) so that the first
+-- real domain migration can simply be added as V2__....sql.

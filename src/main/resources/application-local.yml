@@ -1,0 +1,11 @@
+# Profile for running the app locally against the docker-compose PostgreSQL instance.
+# Activate with: --spring.profiles.active=local
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/payment_workflow
+    username: payment_workflow
+    password: payment_workflow
+
+logging:
+  level:
+    com.paymentworkflow: DEBUG

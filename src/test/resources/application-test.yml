@@ -1,0 +1,13 @@
+# Profile used by the test suite. The datasource itself is supplied at
+# runtime by Testcontainers via @ServiceConnection — no URL is set here.
+spring:
+  flyway:
+    enabled: true
+  jpa:
+    hibernate:
+      ddl-auto: validate
+
+logging:
+  level:
+    com.paymentworkflow: DEBUG
+    org.testcontainers: INFO
