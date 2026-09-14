@@ -1,4 +1,4 @@
-# reliable-payment-workflow
+# ledgerflow
 
 A modular monolith for processing payment workflows reliably (idempotent
 requests, transactional outbox for events, auditable ledger postings).
@@ -17,10 +17,10 @@ migration pipeline, and test setup that later work will build on.
 
 ## Module layout
 
-Single deployable, package-per-module inside `com.paymentworkflow`:
+Single deployable, package-per-module inside `com.ledgerflow`:
 
 ```
-com.paymentworkflow
+com.ledgerflow
 ├── common          shared kernel (types every module may depend on)
 ├── payment         core payment workflow module
 ├── ledger          balance / posting module
@@ -57,7 +57,7 @@ Health check: http://localhost:8080/actuator/health
 ```
 
 This compiles, runs the unit/architecture tests, and runs
-`PaymentWorkflowApplicationTests`, which boots the full Spring context
+`LedgerflowApplicationTests`, which boots the full Spring context
 against a disposable PostgreSQL container via Testcontainers — Docker must
 be running locally for this test (it runs automatically in CI).
 

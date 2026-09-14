@@ -9,5 +9,5 @@ spring:
 
 logging:
   level:
-    com.paymentworkflow: DEBUG
+    com.ledgerflow: DEBUG
     org.testcontainers: INFO

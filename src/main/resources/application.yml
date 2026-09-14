@@ -1,6 +1,6 @@
 spring:
   application:
-    name: reliable-payment-workflow
+    name: ledgerflow
   flyway:
     enabled: true
     locations: classpath:db/migration

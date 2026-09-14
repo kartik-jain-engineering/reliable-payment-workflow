@@ -2,10 +2,10 @@
 # Activate with: --spring.profiles.active=local
 spring:
   datasource:
-    url: jdbc:postgresql://localhost:5432/payment_workflow
-    username: payment_workflow
-    password: payment_workflow
+    url: jdbc:postgresql://localhost:5432/ledgerflow
+    username: ledgerflow
+    password: ledgerflow
 
 logging:
   level:
-    com.paymentworkflow: DEBUG
+    com.ledgerflow: DEBUG

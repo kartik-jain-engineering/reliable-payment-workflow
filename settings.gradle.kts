@@ -1,1 +1,1 @@
-rootProject.name = "reliable-payment-workflow"
+rootProject.name = "ledgerflow"

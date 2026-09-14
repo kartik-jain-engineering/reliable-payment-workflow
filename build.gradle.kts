@@ -4,9 +4,9 @@ plugins {
     id("io.spring.dependency-management") version "1.1.6"
 }
 
-group = "com.paymentworkflow"
+group = "com.ledgerflow"
 version = "0.1.0-SNAPSHOT"
-description = "Modular monolith scaffold for a reliable payment workflow service"
+description = "Modular monolith scaffold for the ledgerflow service"
 
 java {
     toolchain {
