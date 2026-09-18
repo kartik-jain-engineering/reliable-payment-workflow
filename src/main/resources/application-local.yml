@@ -1,9 +1,17 @@
 # Profile for running the app locally against the docker-compose PostgreSQL instance.
 # Activate with: --spring.profiles.active=local
+#
+# The app talks R2DBC; Flyway is blocking JDBC and gets its own explicit
+# connection settings. In a reactive-only app no JDBC DataSource is derived
+# from spring.r2dbc.*, so Flyway cannot infer them.
 spring:
-  datasource:
-    url: jdbc:postgresql://localhost:5432/ledgerflow
+  r2dbc:
+    url: r2dbc:postgresql://localhost:5432/ledgerflow
     username: ledgerflow
+    password: ledgerflow
+  flyway:
+    url: jdbc:postgresql://localhost:5432/ledgerflow
+    user: ledgerflow
     password: ledgerflow
 
 logging:

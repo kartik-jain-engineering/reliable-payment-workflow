@@ -1,11 +1,10 @@
-# Profile used by the test suite. The datasource itself is supplied at
-# runtime by Testcontainers via @ServiceConnection — no URL is set here.
+# Profile used by the test suite. Connection settings are supplied at runtime
+# by Testcontainers via @ServiceConnection, which contributes both the
+# R2dbcConnectionDetails the app uses and the JdbcConnectionDetails Flyway
+# needs — so no URL is set here for either.
 spring:
   flyway:
     enabled: true
-  jpa:
-    hibernate:
-      ddl-auto: validate
 
 logging:
   level:

@@ -9,7 +9,7 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
- * Verifies the Spring application context loads end-to-end, including JPA
+ * Verifies the Spring application context loads end-to-end, including R2DBC
  * and Flyway wiring against a real PostgreSQL instance provided by
  * Testcontainers.
  */
