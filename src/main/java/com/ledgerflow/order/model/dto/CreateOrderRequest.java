@@ -11,13 +11,6 @@ import jakarta.validation.constraints.NotNull;
 
 import com.ledgerflow.order.model.constraint.ValidCurrencyCode;
 
-/**
- * Payload for {@code POST /api/v1/orders}.
- *
- * <p>Structural rules live here so malformed input is rejected with a 400 at
- * the boundary; the same rules are re-asserted as Bean Validation
- * constraints on {@code OrderEntity} before persistence.
- */
 public record CreateOrderRequest(
 
         @NotBlank

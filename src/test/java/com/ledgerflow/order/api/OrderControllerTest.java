@@ -12,9 +12,14 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.reactive.WebFluxTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.oauth2.jwt.BadJwtException;
+import org.springframework.security.oauth2.jwt.ReactiveJwtDecoder;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
+import com.ledgerflow.config.SecurityConfig;
 import com.ledgerflow.order.model.InvalidStateTransitionException;
 import com.ledgerflow.order.model.OrderStatus;
 import com.ledgerflow.order.model.entity.OrderEntity;
@@ -25,8 +30,11 @@ import com.ledgerflow.order.service.OrderService;
 import reactor.core.publisher.Mono;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.springframework.security.test.web.reactive.server.SecurityMockServerConfigurers.mockJwt;
 
 /**
  * Web-layer slice tests for {@link OrderController}.
@@ -40,15 +48,26 @@ import static org.mockito.Mockito.when;
  * picks up automatically as MVC/WebFlux infrastructure.
  */
 @WebFluxTest(OrderController.class)
+@Import(SecurityConfig.class)
 class OrderControllerTest {
 
     private static final String BASE_URL = "/api/v1/orders";
+    private static final String CUSTOMER_ID = "customer-1";
 
     @Autowired
     private WebTestClient webTestClient;
 
     @MockBean
     private OrderService orderService;
+
+    @MockBean
+    private ReactiveJwtDecoder jwtDecoder;
+
+    private WebTestClient withScope(String scope) {
+        return webTestClient.mutateWith(mockJwt()
+                .jwt(jwt -> jwt.subject(CUSTOMER_ID))
+                .authorities(new SimpleGrantedAuthority("SCOPE_" + scope)));
+    }
 
     private static OrderEntity sampleOrder(UUID id, OrderStatus status) {
         OffsetDateTime timestamp = OffsetDateTime.parse("2026-01-01T00:00:00Z");
@@ -85,9 +104,9 @@ class OrderControllerTest {
     void create_shouldReturn201WithLocationAndBody_onSuccess() {
         UUID orderId = UUID.randomUUID();
         OrderEntity created = sampleOrder(orderId, OrderStatus.CREATED);
-        when(orderService.save(any(OrderEntity.class))).thenReturn(Mono.just(created));
+        when(orderService.create(any(OrderEntity.class), eq(CUSTOMER_ID))).thenReturn(Mono.just(created));
 
-        webTestClient.post().uri(BASE_URL)
+        withScope("order:create").post().uri(BASE_URL)
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(VALID_CREATE_BODY)
                 .exchange()
@@ -113,7 +132,7 @@ class OrderControllerTest {
                 }
                 """;
 
-        webTestClient.post().uri(BASE_URL)
+        withScope("order:create").post().uri(BASE_URL)
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(body)
                 .exchange()
@@ -135,7 +154,7 @@ class OrderControllerTest {
                 }
                 """;
 
-        webTestClient.post().uri(BASE_URL)
+        withScope("order:create").post().uri(BASE_URL)
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(body)
                 .exchange()
@@ -155,7 +174,7 @@ class OrderControllerTest {
                 }
                 """;
 
-        webTestClient.post().uri(BASE_URL)
+        withScope("order:create").post().uri(BASE_URL)
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(body)
                 .exchange()
@@ -164,10 +183,10 @@ class OrderControllerTest {
 
     @Test
     void create_shouldReturn400_whenServiceRejectsAConstraintViolation() {
-        when(orderService.save(any(OrderEntity.class)))
+        when(orderService.create(any(OrderEntity.class), eq(CUSTOMER_ID)))
                 .thenReturn(Mono.error(new ConstraintViolationException(Set.of())));
 
-        webTestClient.post().uri(BASE_URL)
+        withScope("order:create").post().uri(BASE_URL)
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(VALID_CREATE_BODY)
                 .exchange()
@@ -183,9 +202,9 @@ class OrderControllerTest {
     @Test
     void get_shouldReturn200WithBody_whenOrderExists() {
         UUID orderId = UUID.randomUUID();
-        when(orderService.get(orderId)).thenReturn(Mono.just(sampleOrder(orderId, OrderStatus.CREATED)));
+        when(orderService.get(orderId, CUSTOMER_ID)).thenReturn(Mono.just(sampleOrder(orderId, OrderStatus.CREATED)));
 
-        webTestClient.get().uri(BASE_URL + "/{orderId}", orderId)
+        withScope("order:read").get().uri(BASE_URL + "/{orderId}", orderId)
                 .exchange()
                 .expectStatus().isOk()
                 .expectBody()
@@ -196,9 +215,9 @@ class OrderControllerTest {
     @Test
     void get_shouldReturn404_whenOrderDoesNotExist() {
         UUID orderId = UUID.randomUUID();
-        when(orderService.get(orderId)).thenReturn(Mono.error(new OrderNotFoundException(orderId)));
+        when(orderService.get(orderId, CUSTOMER_ID)).thenReturn(Mono.error(new OrderNotFoundException(orderId)));
 
-        webTestClient.get().uri(BASE_URL + "/{orderId}", orderId)
+        withScope("order:read").get().uri(BASE_URL + "/{orderId}", orderId)
                 .exchange()
                 .expectStatus().isNotFound()
                 .expectBody()
@@ -212,24 +231,24 @@ class OrderControllerTest {
     @Test
     void cancel_shouldReturn200WithCancelledOrder_onSuccess() {
         UUID orderId = UUID.randomUUID();
-        when(orderService.cancel(orderId))
+        when(orderService.cancel(orderId, CUSTOMER_ID))
                 .thenReturn(Mono.just(sampleOrder(orderId, OrderStatus.CANCELLED)));
 
-        webTestClient.post().uri(BASE_URL + "/{orderId}/cancel", orderId)
+        withScope("order:cancel").post().uri(BASE_URL + "/{orderId}/cancel", orderId)
                 .exchange()
                 .expectStatus().isOk()
                 .expectBody()
                 .jsonPath("$.status").isEqualTo("CANCELLED");
 
-        verify(orderService).cancel(orderId);
+        verify(orderService).cancel(orderId, CUSTOMER_ID);
     }
 
     @Test
     void cancel_shouldReturn404_whenOrderDoesNotExist() {
         UUID orderId = UUID.randomUUID();
-        when(orderService.cancel(orderId)).thenReturn(Mono.error(new OrderNotFoundException(orderId)));
+        when(orderService.cancel(orderId, CUSTOMER_ID)).thenReturn(Mono.error(new OrderNotFoundException(orderId)));
 
-        webTestClient.post().uri(BASE_URL + "/{orderId}/cancel", orderId)
+        withScope("order:cancel").post().uri(BASE_URL + "/{orderId}/cancel", orderId)
                 .exchange()
                 .expectStatus().isNotFound()
                 .expectBody()
@@ -239,15 +258,77 @@ class OrderControllerTest {
     @Test
     void cancel_shouldReturn409_whenOrderIsAlreadyCancelled() {
         UUID orderId = UUID.randomUUID();
-        when(orderService.cancel(orderId))
+        when(orderService.cancel(orderId, CUSTOMER_ID))
                 .thenReturn(Mono.error(
                         new InvalidStateTransitionException(OrderStatus.CANCELLED, OrderStatus.CANCELLED)));
 
-        webTestClient.post().uri(BASE_URL + "/{orderId}/cancel", orderId)
+        withScope("order:cancel").post().uri(BASE_URL + "/{orderId}/cancel", orderId)
                 .exchange()
                 .expectStatus().isEqualTo(409)
                 .expectBody()
                 .jsonPath("$.title").isEqualTo("Invalid order state transition");
+    }
+
+    // ---------------------------------------------------------------
+    // Security: no token / malformed token / missing scope
+    // ---------------------------------------------------------------
+
+    @Test
+    void create_shouldReturn401_whenNoToken() {
+        webTestClient.post().uri(BASE_URL)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(VALID_CREATE_BODY)
+                .exchange()
+                .expectStatus().isUnauthorized();
+    }
+
+    @Test
+    void get_shouldReturn401_whenNoToken() {
+        webTestClient.get().uri(BASE_URL + "/{orderId}", UUID.randomUUID())
+                .exchange()
+                .expectStatus().isUnauthorized();
+    }
+
+    @Test
+    void cancel_shouldReturn401_whenNoToken() {
+        webTestClient.post().uri(BASE_URL + "/{orderId}/cancel", UUID.randomUUID())
+                .exchange()
+                .expectStatus().isUnauthorized();
+    }
+
+    @Test
+    void create_shouldReturn401_whenBearerTokenIsMalformed() {
+        when(jwtDecoder.decode(anyString())).thenReturn(Mono.error(new BadJwtException("malformed token")));
+
+        webTestClient.post().uri(BASE_URL)
+                .header("Authorization", "Bearer not-a-real-jwt")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(VALID_CREATE_BODY)
+                .exchange()
+                .expectStatus().isUnauthorized();
+    }
+
+    @Test
+    void create_shouldReturn403_whenScopeIsMissing() {
+        withScope("order:read").post().uri(BASE_URL)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(VALID_CREATE_BODY)
+                .exchange()
+                .expectStatus().isForbidden();
+    }
+
+    @Test
+    void get_shouldReturn403_whenScopeIsMissing() {
+        withScope("order:create").get().uri(BASE_URL + "/{orderId}", UUID.randomUUID())
+                .exchange()
+                .expectStatus().isForbidden();
+    }
+
+    @Test
+    void cancel_shouldReturn403_whenScopeIsMissing() {
+        withScope("order:read").post().uri(BASE_URL + "/{orderId}/cancel", UUID.randomUUID())
+                .exchange()
+                .expectStatus().isForbidden();
     }
 }
 

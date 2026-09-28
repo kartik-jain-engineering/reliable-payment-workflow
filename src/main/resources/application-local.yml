@@ -13,6 +13,11 @@ spring:
     url: jdbc:postgresql://localhost:5432/ledgerflow
     user: ledgerflow
     password: ledgerflow
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: http://localhost:8180/realms/ledgerflow
 
 logging:
   level:

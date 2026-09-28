@@ -5,6 +5,16 @@
 spring:
   flyway:
     enabled: true
+  # Tests authenticate via mockJwt(); this URI only lets Boot build a JwtDecoder and is never fetched.
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: http://localhost:1/unused-in-tests
+
+ledgerflow:
+  idempotency:
+    max-poll-attempts: 15
 
 logging:
   level:

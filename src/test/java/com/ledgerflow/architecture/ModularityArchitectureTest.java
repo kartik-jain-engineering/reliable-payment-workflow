@@ -11,8 +11,8 @@ import static com.tngtech.archunit.library.dependencies.SlicesRuleDefinition.sli
 /**
  * Basic module/layer-boundary checks for the modular monolith.
  *
- * <p>Each top-level package under {@code com.ledgerflow} is a module (only
- * {@code order} has real code so far), layered internally as {@code api}
+ * <p>Each top-level package under {@code com.ledgerflow} is a module ({@code order},
+ * {@code payment} and {@code idempotency} have real code so far), layered internally as {@code api}
  * (controllers, request/response mapping) → {@code service} (use cases) →
  * {@code repo} (Spring Data repositories), all depending on {@code model}
  * (entities, DTOs and enums) — dependencies point inward, and {@code model}
@@ -40,11 +40,24 @@ class ModularityArchitectureTest {
                     .allowEmptyShould(true);
 
     @ArchTest
-    static final ArchRule repo_should_not_depend_on_api =
+    static final ArchRule repo_should_not_depend_on_outer_layers =
             noClasses()
                     .that().resideInAPackage("..repo..")
+                    .should().dependOnClassesThat().resideInAnyPackage("..api..", "..service..")
+                    .allowEmptyShould(true);
+
+    @ArchTest
+    static final ArchRule api_should_not_be_depended_upon =
+            noClasses()
+                    .that().resideOutsideOfPackage("..api..")
                     .should().dependOnClassesThat().resideInAPackage("..api..")
                     .allowEmptyShould(true);
+
+    @ArchTest
+    static final ArchRule idempotency_should_not_depend_on_business_modules =
+            noClasses()
+                    .that().resideInAPackage("com.ledgerflow.idempotency..")
+                    .should().dependOnClassesThat().resideInAnyPackage("com.ledgerflow.order..", "com.ledgerflow.payment..");
 
     @ArchTest
     static final ArchRule model_should_not_depend_on_spring_web =

@@ -5,10 +5,7 @@ import java.util.Currency;
 import jakarta.validation.ConstraintValidator;
 import jakarta.validation.ConstraintValidatorContext;
 
-/**
- * Validates {@link ValidCurrencyCode} by asking the JDK's currency registry,
- * which rejects well-formed but non-existent codes such as {@code ZZZ}.
- */
+
 public class CurrencyCodeValidator implements ConstraintValidator<ValidCurrencyCode, String> {
 
     @Override

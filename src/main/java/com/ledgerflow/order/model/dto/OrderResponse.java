@@ -7,13 +7,6 @@ import java.util.UUID;
 
 import com.ledgerflow.order.model.OrderStatus;
 
-/**
- * Read model returned by the order endpoints.
- *
- * <p>An explicit, standalone view: it neither wraps nor embeds
- * {@code OrderEntity}, so the wire format can evolve independently of the
- * persistence model.
- */
 public record OrderResponse(
         UUID id,
         String customerId,

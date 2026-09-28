@@ -11,17 +11,7 @@ import jakarta.validation.Payload;
 import static java.lang.annotation.ElementType.FIELD;
 import static java.lang.annotation.ElementType.RECORD_COMPONENT;
 
-/**
- * Asserts that the annotated value is a currency code the JDK recognises as
- * ISO 4217 — a {@code [A-Z]{3}} pattern is not enough, since it happily
- * accepts codes like {@code ZZZ} that no currency uses.
- *
- * <p>{@code null} is considered valid; combine with {@code @NotNull} or
- * {@code @NotBlank} to report nullness once. Used on both the
- * {@code model.dto} request records and the {@code model.entity} classes so
- * the same rule protects the API boundary and defends the persistence
- * boundary.
- */
+
 @Documented
 @Constraint(validatedBy = CurrencyCodeValidator.class)
 @Target({FIELD, RECORD_COMPONENT})

@@ -3,54 +3,100 @@
 A modular monolith for processing payment workflows reliably (idempotent
 requests, transactional outbox for events, auditable ledger postings).
 
-**Status:** the `order` module has a working create / fetch / cancel API
-backed by PostgreSQL, and is currently the only module with any code. This
-iteration also establishes the project structure, build, config, database
-migration pipeline, and test setup that future modules (`payment`, `ledger`,
-`idempotency`, `outbox`, ...) will build on, following the same
-`api` / `service` / `repo` / `model` package layout as `order`.
+**Status:** the `order` module has a working create / fetch / cancel API,
+and the `payment` module can authorize a payment for an order that is
+already `PAYMENT_PENDING`, driving the order to `CONFIRMED` on success or
+`FAILED` on decline/timeout — both backed by PostgreSQL. Every `order` and
+`payment` endpoint requires a JWT bearer token and a per-route OAuth2
+scope, plus a resource-ownership check tying orders and payments to the
+JWT subject — see [Trust boundaries](#trust-boundaries). `POST
+/api/v1/payments` also requires an `Idempotency-Key` header, handled by
+the `idempotency` module — see [Idempotency](#idempotency). `ledger` and
+`outbox` are not built yet; they will follow the same `api` / `service` /
+`repo` / `model` package layout as `order`, `payment` and `idempotency`
+once they have real code.
 
 ## Stack
 
 - Java 21
-- Spring Boot 3.3 (WebFlux, Data R2DBC, Actuator, Validation)
+- Spring Boot 3.3 (WebFlux, Data R2DBC, Actuator, Validation, OAuth2 Resource Server)
 - Lombok, for boilerplate-free entities and constructor injection
 - Gradle (wrapper committed — no local Gradle install required)
 - PostgreSQL, accessed over R2DBC by the app and over blocking JDBC by Flyway
-- JUnit 5, Reactor Test, Testcontainers, ArchUnit
+- Keycloak, as the local JWT issuer for the OAuth2 resource server (dev only — see `docker-compose.yml`)
+- JUnit 5, Reactor Test, Testcontainers, ArchUnit, spring-security-test
 
 ## Module layout
 
-Single deployable, package-per-module inside `com.ledgerflow`. `order` is
-currently the only module with real code:
+Single deployable, package-per-module inside `com.ledgerflow`. `order`,
+`payment` and `idempotency` have real code so far:
 
 ```
 com.ledgerflow
-└── order
-    ├── api      REST controllers, the exception handler, and DTO <-> entity mapping
-    ├── service  use cases (OrderService): orchestrates repo calls, re-validates before writing
-    ├── repo     Spring Data ReactiveCrudRepository interfaces
+├── config
+│   └── SecurityConfig  the OAuth2 resource server filter chain (scopes, permitted paths)
+├── order
+│   ├── api      REST controllers, the exception handler, and DTO <-> entity mapping
+│   ├── service  use cases (OrderService): orchestrates repo calls, re-validates before writing
+│   ├── repo     Spring Data ReactiveCrudRepository interfaces
+│   └── model
+│       ├── (OrderStatus, InvalidStateTransitionException)
+│       ├── entity      Spring Data R2DBC entities (OrderEntity, OrderItemEntity)
+│       ├── dto         API request/response records (CreateOrderRequest, OrderResponse, ...)
+│       └── constraint  shared Bean Validation constraints (@ValidCurrencyCode)
+├── payment
+│   ├── api       PaymentController, PaymentExceptionHandler, PaymentMapper
+│   ├── service   PaymentService: creates a payment, calls the provider, drives the linked order
+│   ├── repo      PaymentRepository (Spring Data ReactiveCrudRepository)
+│   ├── provider  PaymentProvider interface and FakePaymentProvider, its deterministic stand-in
+│   └── model
+│       ├── (PaymentStatus, SimulatedOutcome, InvalidStateTransitionException)
+│       ├── entity  Spring Data R2DBC entity (PaymentEntity)
+│       └── dto     API request/response records (AuthorizePaymentRequest, PaymentResponse)
+└── idempotency
+    ├── api      IdempotencyExceptionHandler only — idempotency has no controllers of its
+    │            own; its exceptions surface from other modules' endpoints
+    ├── service  IdempotencyService: claims/replays keys by Idempotency-Key + request hash;
+    │            IdempotencyProperties (poll retry/backoff config)
+    ├── repo     IdempotencyKeyRepository (Spring Data ReactiveCrudRepository)
     └── model
-        ├── (OrderStatus, InvalidStateTransitionException)
-        ├── entity      Spring Data R2DBC entities (OrderEntity, OrderItemEntity)
-        ├── dto         API request/response records (CreateOrderRequest, OrderResponse, ...)
-        └── constraint  shared Bean Validation constraints (@ValidCurrencyCode)
+        ├── IdempotencyKeyStatus
+        └── entity  Spring Data R2DBC entity (IdempotencyKeyEntity)
 ```
 
 Dependencies point inward: `api` → `service` → `repo`, all depending on
-`model`; `model` never depends back out on any of the other three. This is
-enforced by the ArchUnit rules in `src/test/java/.../architecture`, which
-also keep the top-level module packages (currently just `order`) free of
-cycles — new modules (`payment`, `ledger`, `idempotency`, `outbox`, `common`)
-should follow the same four-package layout once they have real code.
+`model`; `model` never depends back out on any of the other three, and
+nothing outside `api` may depend on `api`. This is enforced by the ArchUnit
+rules in `src/test/java/.../architecture` (`ModularityArchitectureTest`),
+which also forbid `repo` from depending on `service`/`api`, and keep the
+top-level module packages (currently `order`, `payment` and `idempotency`)
+free of cycles — `ledger`, `outbox` and `common` should follow the same
+four-package layout once they have real code. `payment` is the one
+exception: it adds a fifth package, `provider`, which those rules don't
+constrain. `payment.service` also depends directly on
+`order.service.OrderService` to read and transition orders, and
+`payment.api.PaymentController` depends on
+`idempotency.service.IdempotencyService` to wrap payment authorization — a
+dedicated ArchUnit rule (`idempotency_should_not_depend_on_business_modules`)
+forbids the reverse, so `idempotency` may never depend on `order` or
+`payment`. `PaymentEntity` also reuses `order`'s `@ValidCurrencyCode`
+constraint rather than duplicating it.
 
 ## Running locally
 
-Start PostgreSQL:
+Start PostgreSQL and Keycloak:
 
 ```bash
 docker compose up -d
 ```
+
+Keycloak comes up with no realm, client, or user provisioned — before the
+app under the `local` profile will accept any request other than the
+health check, create a `ledgerflow` realm, a client, and a user in the
+Keycloak admin console at http://localhost:8180 (bootstrap admin
+`admin`/`admin`), and issue that user tokens carrying the `order:*` /
+`payment:*` scopes this app checks. See [Trust
+boundaries](#trust-boundaries).
 
 Run the app against it:
 
@@ -58,7 +104,7 @@ Run the app against it:
 ./gradlew bootRun --args='--spring.profiles.active=local'
 ```
 
-Health check: http://localhost:8080/actuator/health
+Health check (no auth required): http://localhost:8080/actuator/health
 
 ## Building and testing
 
@@ -76,15 +122,16 @@ commands in this README.
 
 ### Running tests without Docker
 
-Two test classes require Docker Desktop to be running, since they start a
-real PostgreSQL container via Testcontainers: `LedgerflowApplicationTests`
-and `OrderServiceIntegrationTest`. Contributors without Docker
-available can run everything else — the entity and validation unit tests,
-the `@WebFluxTest` controller slice, and the ArchUnit module-boundary
-checks — by targeting those packages instead:
+Three test classes require Docker Desktop to be running, since they start a
+real PostgreSQL container via Testcontainers: `LedgerflowApplicationTests`,
+`OrderServiceIntegrationTest` and `PaymentControllerTest`. Contributors
+without Docker available can run everything else — the entity and
+validation unit tests, the `@WebFluxTest` controller slice, the
+mock-based `PaymentServiceTest`, and the ArchUnit module-boundary checks —
+by targeting those packages instead:
 
 ```powershell
-.\gradlew.bat test --tests "com.ledgerflow.order.model.*" --tests "com.ledgerflow.order.api.*" --tests "com.ledgerflow.order.service.OrderServiceTest" --tests "*Architecture*" --console=plain
+.\gradlew.bat test --tests "com.ledgerflow.order.model.*" --tests "com.ledgerflow.order.api.*" --tests "com.ledgerflow.order.service.OrderServiceTest" --tests "com.ledgerflow.payment.model.*" --tests "com.ledgerflow.payment.provider.*" --tests "com.ledgerflow.payment.service.PaymentServiceTest" --tests "*Architecture*" --console=plain
 ```
 
 ## Configuration profiles
@@ -98,23 +145,29 @@ checks — by targeting those packages instead:
 ## Database migrations
 
 Flyway migrations live in `src/main/resources/db/migration`, named
-`V<version>__description.sql`. `V1__initial_schema.sql` is currently a
-placeholder — the first real domain migration should be added as
-`V2__....sql`.
+`V<version>__description.sql`. `V1__initial_schema.sql` is a placeholder;
+`V2__create_orders_schema.sql` creates `orders`/`order_items`, and
+`V3__create_payments_schema.sql` creates `payments` (foreign-keyed to
+`orders.id`).
 
 ## Order API
 
-The `order` module exposes three endpoints under `/api/v1/orders`. Errors
-are returned as RFC 7807 `ProblemDetail` bodies (see below).
+The `order` module exposes three endpoints under `/api/v1/orders`. Every
+endpoint requires a bearer JWT and a per-route scope (`order:create`,
+`order:read`, `order:cancel`) — see [Trust boundaries](#trust-boundaries).
+Errors are returned as RFC 7807 `ProblemDetail` bodies (see below).
 
 ### Create an order
 
 `POST /api/v1/orders` → `201 Created`, with a `Location` header pointing at
-the new order.
+the new order. `customerId` in the body must equal the caller's JWT `sub`
+claim, or the request fails with `403` — see [Resource
+ownership](#resource-ownership).
 
 ```bash
 curl -i -X POST http://localhost:8080/api/v1/orders \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <token>" \
   -d '{
     "customerId": "cust-123",
     "currency": "USD",
@@ -149,7 +202,8 @@ Response (`201`, `Location: /api/v1/orders/b6f1c8b0-6e0e-4b8a-9c2c-2c7a9b1f0a11`
 `GET /api/v1/orders/{orderId}` → `200 OK` with the same body shape as above.
 
 ```bash
-curl http://localhost:8080/api/v1/orders/b6f1c8b0-6e0e-4b8a-9c2c-2c7a9b1f0a11
+curl http://localhost:8080/api/v1/orders/b6f1c8b0-6e0e-4b8a-9c2c-2c7a9b1f0a11 \
+  -H "Authorization: Bearer <token>"
 ```
 
 ### Cancel an order
@@ -159,7 +213,8 @@ curl http://localhost:8080/api/v1/orders/b6f1c8b0-6e0e-4b8a-9c2c-2c7a9b1f0a11
 exposed over the API — see [Order state machine](#order-state-machine).
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/orders/b6f1c8b0-6e0e-4b8a-9c2c-2c7a9b1f0a11/cancel
+curl -X POST http://localhost:8080/api/v1/orders/b6f1c8b0-6e0e-4b8a-9c2c-2c7a9b1f0a11/cancel \
+  -H "Authorization: Bearer <token>"
 ```
 
 ### Error responses
@@ -167,6 +222,10 @@ curl -X POST http://localhost:8080/api/v1/orders/b6f1c8b0-6e0e-4b8a-9c2c-2c7a9b1
 All three endpoints share one exception handler
 (`OrderExceptionHandler`, scoped to `com.ledgerflow.order`), which always
 returns a Spring `ProblemDetail`.
+
+`401 Unauthorized` / `403 Forbidden` — missing/invalid token, missing
+scope, or a resource-ownership mismatch; see [Trust
+boundaries](#trust-boundaries).
 
 `400 Bad Request` — request validation failure (`CreateOrderRequest`'s Bean
 Validation constraints), body includes an `errors` array of
@@ -226,8 +285,284 @@ Valid transitions, enforced by `OrderEntity.transitionTo` on the entity itself
 Any other transition — including moving out of `CONFIRMED`, `CANCELLED` or
 `FAILED`, and any self-transition — throws
 `InvalidStateTransitionException`, which `OrderExceptionHandler` maps to
-`409 Conflict`. Only `cancel` is currently exposed via the API; nothing
-drives an order into `PAYMENT_PENDING`, `CONFIRMED` or `FAILED` yet.
+`409 Conflict`. `cancel` is the only order transition exposed on the order
+API itself; `payment`'s `authorize` endpoint drives a `PAYMENT_PENDING`
+order to `CONFIRMED` or `FAILED` (see
+[Payment state machine](#payment-state-machine)) — but nothing in this
+codebase moves an order into `PAYMENT_PENDING` through the API yet, so
+today that transition has to be done directly on the entity, the way the
+payment tests do it.
+
+## Payment API
+
+The `payment` module exposes two endpoints under `/api/v1/payments`. Every
+endpoint requires a bearer JWT and a per-route scope (`payment:process`,
+`payment:read`) — see [Trust boundaries](#trust-boundaries). Errors are
+returned as RFC 7807 `ProblemDetail` bodies (see below).
+
+### Authorize a payment
+
+`POST /api/v1/payments` → `201 Created`, with a `Location` header pointing
+at the new payment. `orderId` must reference an order that is already
+`PAYMENT_PENDING` and owned by the caller. `simulateOutcome` selects the
+deterministic outcome `FakePaymentProvider` returns — `SUCCESS` (the
+default if omitted), `DECLINE`, or `TIMEOUT` — see [Simulated
+outcomes](#simulated-outcomes). This endpoint also requires an
+`Idempotency-Key` header — see [Idempotency](#idempotency).
+
+```bash
+curl -i -X POST http://localhost:8080/api/v1/payments \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <token>" \
+  -H "Idempotency-Key: 5b1f6c2e-1111-4b8a-9c2c-2c7a9b1f0a01" \
+  -d '{
+    "orderId": "b6f1c8b0-6e0e-4b8a-9c2c-2c7a9b1f0a11",
+    "simulateOutcome": "SUCCESS"
+  }'
+```
+
+Response (`201`, `Location: /api/v1/payments/1a2b3c4d-0000-4b8a-9c2c-2c7a9b1f0a22`):
+
+```json
+{
+  "id": "1a2b3c4d-0000-4b8a-9c2c-2c7a9b1f0a22",
+  "orderId": "b6f1c8b0-6e0e-4b8a-9c2c-2c7a9b1f0a11",
+  "amount": 59.97,
+  "currency": "USD",
+  "status": "AUTHORIZED",
+  "createdAt": "2026-09-14T10:16:00Z",
+  "updatedAt": "2026-09-14T10:16:00Z"
+}
+```
+
+### Fetch a payment
+
+`GET /api/v1/payments/{paymentId}` → `200 OK` with the same body shape.
+
+```bash
+curl http://localhost:8080/api/v1/payments/1a2b3c4d-0000-4b8a-9c2c-2c7a9b1f0a22 \
+  -H "Authorization: Bearer <token>"
+```
+
+### Simulated outcomes
+
+`FakePaymentProvider` is the only `PaymentProvider` implementation so far —
+a stand-in for a real processor until one is wired up. The outcome is
+whatever `simulateOutcome` the caller passes, not derived from the amount,
+the clock, or any random source, so every call is replayable:
+
+| `simulateOutcome` | Payment status | Order status |
+|--------------------|-----------------|---------------|
+| `SUCCESS` (or omitted) | `AUTHORIZED` | `CONFIRMED` |
+| `DECLINE`           | `DECLINED`      | `FAILED`      |
+| `TIMEOUT`            | `TIMED_OUT`     | `FAILED`      |
+
+`TIMEOUT` does not sleep — the provider signals a
+`PaymentProviderTimeoutException` immediately.
+
+### Error responses
+
+Payment endpoints share one exception handler (`PaymentExceptionHandler`,
+scoped to `com.ledgerflow.payment`), kept separate from
+`OrderExceptionHandler` (scoped to `com.ledgerflow.order`, which never sees
+exceptions raised from `PaymentController`).
+
+`401 Unauthorized` / `403 Forbidden` — missing/invalid token, missing
+scope, or a resource-ownership mismatch on the payment's order; see [Trust
+boundaries](#trust-boundaries).
+
+`404 Not Found` — no order exists with the given `orderId`, or no payment
+exists with the given `paymentId`.
+
+`409 Conflict` — the referenced order is not `PAYMENT_PENDING`:
+
+```json
+{
+  "type": "about:blank",
+  "title": "Order not payable",
+  "status": 409,
+  "detail": "order b6f1c8b0-6e0e-4b8a-9c2c-2c7a9b1f0a11 is not awaiting payment: CREATED"
+}
+```
+
+`400 Bad Request` — request validation failure (missing `orderId`), a
+missing `Idempotency-Key` header, or a `ConstraintViolationException` from
+`PaymentService`'s persistence-boundary validation, in the same `errors`
+array shape as the order API. See [Idempotency](#idempotency) for the
+other `Idempotency-Key`-related status codes (`409`, `422`).
+
+## Payment state machine
+
+A payment moves through four states (`PaymentStatus`): `PENDING`,
+`AUTHORIZED`, `DECLINED`, `TIMED_OUT`. `AUTHORIZED`, `DECLINED` and
+`TIMED_OUT` are all terminal.
+
+Valid transitions, enforced by `PaymentEntity.transitionTo` (mirrors
+`OrderEntity`'s pattern):
+
+- `PENDING` → `AUTHORIZED`
+- `PENDING` → `DECLINED`
+- `PENDING` → `TIMED_OUT`
+
+`PaymentService.authorize` creates a payment in `PENDING` for the given
+order, calls the `PaymentProvider`, and applies the outcome to the payment
+and the linked order in the same step (see
+[Simulated outcomes](#simulated-outcomes)). Any other payment transition
+throws `InvalidStateTransitionException`, mapped to `409 Conflict` by
+`PaymentExceptionHandler`.
+
+## Trust boundaries
+
+### Authentication and scopes
+
+Every route is authenticated except the three `SecurityConfig` permits
+outright: `GET /actuator/health`, `GET /actuator/health/**` and `GET /actuator/info`. Every other
+route needs a valid JWT bearer token from the configured OAuth2 resource
+server, plus the scope below, checked as a Spring Security `SCOPE_*`
+authority on the route (`hasAuthority(...)` in `SecurityConfig`, not
+application code):
+
+| Route                                  | Required scope     |
+|-----------------------------------------|---------------------|
+| `POST /api/v1/orders`                   | `order:create`       |
+| `GET /api/v1/orders/{orderId}`          | `order:read`         |
+| `POST /api/v1/orders/{orderId}/cancel`  | `order:cancel`        |
+| `POST /api/v1/payments`                 | `payment:process`     |
+| `GET /api/v1/payments/{paymentId}`      | `payment:read`        |
+| anything else                            | denied (`anyExchange().denyAll()`) |
+
+A missing token, or one the resource server can't validate (expired, wrong
+issuer, bad signature), gets `401 Unauthorized` — the default behavior of
+Spring Security's `oauth2ResourceServer().jwt(...)`, not custom code here.
+A valid token missing the required scope gets `403 Forbidden`, also the
+framework default for a `hasAuthority(...)` mismatch.
+
+### Resource ownership
+
+Beyond the scope check, `OrderService` and `PaymentService` compare the
+JWT `sub` claim (`jwt.getSubject()`, read in the controllers) against the
+resource's owner:
+
+- **Orders** — `OrderService.create`/`get`/`cancel` (the `(id, customerId)`
+  overloads used by `OrderController`) call `requireOwnedBy`, which checks
+  `order.getCustomerId().equals(customerId)` and throws
+  `OrderAccessDeniedException` (→ `403 Forbidden`) on mismatch. On
+  `POST /api/v1/orders`, `customerId` comes from the request body
+  (`CreateOrderRequest.customerId`), not the token, and that same ownership
+  check runs on the order being created — so creating an order with a
+  `customerId` that doesn't match the caller's `sub` fails with `403`
+  rather than silently assigning the order to someone else.
+- **Payments** — `PaymentService.get(paymentId, customerId)` and
+  `PaymentService.authorize(orderId, outcome, customerId)` inherit
+  ownership through the linked order by calling
+  `OrderService.get(orderId, customerId)`, so a payment is only
+  visible/authorizable to the customer who owns its order.
+
+What this does **not** protect against:
+- It trusts the IdP's `sub` claim completely — any validly signed JWT for
+  a given `sub` is treated as that customer, with no additional binding
+  (e.g. to a device or session).
+- There is no admin/support role or ownership override anywhere in
+  `SecurityConfig`, `OrderService`, or `PaymentService` — no principal can
+  read or act on another customer's orders or payments.
+- A stolen but still-valid token is trusted for its full remaining
+  lifetime; there is no revocation, session, or replay check beyond
+  standard JWT expiry validation.
+- Ownership is enforced in the service layer, as a second check after the
+  route-level scope check in `SecurityConfig` — the two checks are
+  independent, so a new service method that forgets to call
+  `requireOwnedBy` (or the payment-side equivalent) would compile and pass
+  the scope check while skipping ownership entirely.
+
+### Logging
+
+JWTs, the `Authorization` header, the `Idempotency-Key` header, and
+request/response bodies must never be logged. As of this iteration, no
+code under `src/main` logs anything at all — a grep for `log.`, `@Slf4j`,
+`Logger`, and `System.out` across `src/main` returns no matches. However,
+both `application-local.yml` and `application-test.yml` set
+`logging.level.com.ledgerflow: DEBUG`, so any logging statement added
+later under `com.ledgerflow` at `DEBUG` or above must not include these
+values.
+
+### Local Keycloak vs. tests
+
+`docker-compose.yml` runs a local, dev-mode Keycloak
+(`quay.io/keycloak/keycloak:26.0.7`, `start-dev`, no persistent volume) on
+port 8180, with a bootstrap admin login (`admin`/`admin`) for its admin
+console. Nothing is auto-provisioned: no realm, client, or user exists
+until a developer creates them by hand. `application-local.yml` points the
+resource server at issuer `http://localhost:8180/realms/ledgerflow`, so
+the realm must be named `ledgerflow`, and its client/user must be set up
+to issue tokens with the `order:*`/`payment:*` scopes above and a `sub`
+matching the `customerId` used in requests.
+
+Tests never talk to Keycloak. `application-test.yml` points
+`jwk-set-uri` at a dummy, unreachable URL — by its own comment, this value
+"is never fetched" because the test suite authenticates requests with
+spring-security-test's `mockJwt()`, which populates the reactive security
+context directly instead of validating a real token.
+
+## Idempotency
+
+`POST /api/v1/payments` requires an `Idempotency-Key` request header
+(`PaymentController`, `@RequestHeader` with no `required = false`),
+enforced by `IdempotencyService.execute` and backed by the
+`idempotency_keys` table (`V4__create_idempotency_keys_schema.sql`). Keys
+are scoped per authenticated subject: the table's unique constraint is on
+`(owner_id, idempotency_key)`, where `owner_id` is `jwt.getSubject()` — so
+the same key string can be reused independently by two different
+customers, but not reused by the same customer for a different request.
+
+- **Missing header** → `400 Bad Request`
+  (`MissingRequestValueException`, handled by `PaymentExceptionHandler`,
+  title "Missing request value").
+- **New key** → the request claims the key row (an insert; a
+  unique-constraint violation means another request already holds it),
+  runs the payment authorization, and updates the row to `COMPLETED` with
+  the serialized response status, headers, and body.
+- **Same key, same request body** (request bodies are compared by SHA-256
+  hash of the serialized JSON) → once the original request reaches
+  `COMPLETED`, its stored response is replayed verbatim — same status,
+  headers, and body — instead of re-running the authorization.
+- **Same key, different request body** → `422 Unprocessable Entity`
+  (`IdempotencyKeyReusedException`, title "Idempotency key reused").
+- **Concurrent request with the same key still in progress** — the request
+  that didn't win the claim polls for completion with backoff
+  (`Retry.backoff`, configured by `ledgerflow.idempotency.max-poll-attempts`
+  / `.min-poll-backoff` / `.max-poll-backoff` — `8` attempts between `50ms`
+  and `1s` by default). If the original request completes within that
+  window, it returns the replayed response; if the attempts are exhausted
+  first, it fails with `409 Conflict` (`IdempotencyKeyInProgressException`,
+  title "Request in progress").
+- **If the payment authorization fails** (any exception from the wrapped
+  action — `PaymentService.authorize` plus the response mapping — while the
+  request is still running), the claimed key row is deleted rather than
+  marked `COMPLETED` — a subsequent retry with the same key and the same
+  body is treated as a brand-new attempt, not a replay. This is the only
+  case that deletes the row; see **Limitations** below for the cases where
+  a claim is left behind instead.
+
+### Limitations
+
+`IdempotencyService.perform` only deletes the claimed row inside the
+`onErrorResume` on the wrapped action described above. Three other cases
+leave the row stuck in `IN_PROGRESS` forever, since `idempotency_keys`
+(`V4__create_idempotency_keys_schema.sql`) has no expiry or lease column:
+
+- The client disconnects or cancels the request mid-flight. This is
+  deliberate, not an oversight — the payment provider may already have
+  been invoked by that point, so deleting the claim on cancellation could
+  let a retried request double-charge.
+- The application crashes mid-request.
+- The payment authorization succeeds but persisting the `COMPLETED`
+  result afterwards (`IdempotencyService.complete`) fails — that happens
+  after the `onErrorResume` guard, so the row is never deleted.
+
+In all three cases, every subsequent request with that key gets `409
+Conflict` (`IdempotencyKeyInProgressException`) until the row is removed
+manually. A lease/expiry column on the claim is the intended fix, not yet
+implemented.
 
 ## Design decisions
 
@@ -342,19 +677,33 @@ drives an order into `PAYMENT_PENDING`, `CONFIRMED` or `FAILED` yet.
   into the `orders` row. `OrderEntity.items` is `@Transient`: Spring Data
   ignores it for the `orders` row mapping, and `OrderService` populates it
   from a separate `OrderItemRepository` query.
-- **Money is `BigDecimal` end to end** (`totalAmount`, `unitPrice`), backed
-  by `numeric(19, 2)` columns — no `double`/`float` anywhere in the order
-  model.
+- **Money is `BigDecimal` end to end** (`totalAmount`, `unitPrice`,
+  `PaymentEntity.amount`), backed by `numeric(19, 2)` columns — no
+  `double`/`float` anywhere in the order or payment model.
+- **`FakePaymentProvider`'s outcome is an explicit field, not derived from
+  the amount.** `AuthorizePaymentRequest.simulateOutcome` names the outcome
+  directly (`SUCCESS`/`DECLINE`/`TIMEOUT`), so every one of the three code
+  paths through `PaymentService.settle` can be exercised on demand and
+  replayed deterministically, rather than relying on magic amounts to
+  trigger a decline or a timeout.
 
 ## Explicitly out of scope for this iteration
 
-- Kafka, Redis, Keycloak, Kubernetes, and any frontend — not added yet.
-- Actual payment processing: no payment gateway integration and no
-  charge/capture logic. `PAYMENT_PENDING`, `CONFIRMED` and `FAILED` exist as
-  `OrderStatus` values and their transition rules are enforced on the
-  entity, but nothing in this codebase drives an order into them — the
-  only order transition currently reachable through the API is `cancel`.
-- The `payment`, `ledger`, `idempotency`, `outbox` and `common` module
-  packages: removed rather than kept as empty scaffolding, since they had
-  no code. Re-add them with the same `api`/`service`/`repo`/`model` layout
-  as `order` once they have real behaviour.
+- Kafka, Redis, Kubernetes, and any frontend — not added yet.
+- A real payment gateway. `PaymentProvider` has one implementation,
+  `FakePaymentProvider`, which returns whichever outcome the caller asks
+  for instead of calling an actual processor.
+- Driving an order into `PAYMENT_PENDING` through the API. The transition
+  rule exists on `OrderEntity` and `payment`'s `authorize` endpoint requires
+  it, but no endpoint in this codebase performs it — see
+  [Order state machine](#order-state-machine).
+- An admin/support role, token revocation, or any override of the
+  resource-ownership check — see [Trust boundaries](#trust-boundaries).
+- A production-ready Keycloak setup. The `docker-compose.yml` `keycloak`
+  service is dev-only (`start-dev`, no persistent realm export) and
+  requires manual realm/client/user provisioning — see [Trust
+  boundaries](#trust-boundaries).
+- The `ledger`, `outbox` and `common` module packages: removed rather than
+  kept as empty scaffolding, since they have no code yet. Re-add them with
+  the same `api`/`service`/`repo`/`model` layout as `order`, `payment` and
+  `idempotency` once they have real behaviour.

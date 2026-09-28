@@ -10,9 +10,6 @@ import com.ledgerflow.order.model.entity.OrderItemEntity;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
-/**
- * Spring Data repository for the {@code order_items} table.
- */
 @Repository
 public interface OrderItemRepository extends ReactiveCrudRepository<OrderItemEntity, UUID> {
 

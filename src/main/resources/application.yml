@@ -13,3 +13,9 @@ management:
   endpoint:
     health:
       show-details: when-authorized
+
+ledgerflow:
+  idempotency:
+    max-poll-attempts: 8
+    min-poll-backoff: 50ms
+    max-poll-backoff: 1s

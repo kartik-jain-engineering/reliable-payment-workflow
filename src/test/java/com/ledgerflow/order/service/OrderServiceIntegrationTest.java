@@ -1,6 +1,8 @@
 package com.ledgerflow.order.service;
 
 import java.math.BigDecimal;
+import java.time.OffsetDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.UUID;
 
@@ -57,6 +59,10 @@ class OrderServiceIntegrationTest {
         return OrderEntity.createNew("customer-1", "USD", new BigDecimal("29.97"), items);
     }
 
+    private static OffsetDateTime roundToMicros(OffsetDateTime value) {
+        return value.plusNanos(500).truncatedTo(ChronoUnit.MICROS);
+    }
+
     @Test
     void save_thenGet_shouldRoundTripEveryField() {
         OrderEntity order = newOrder();
@@ -69,8 +75,11 @@ class OrderServiceIntegrationTest {
                     assertThat(actual.getCurrency()).isEqualTo(order.getCurrency());
                     assertThat(actual.getTotalAmount()).isEqualByComparingTo(order.getTotalAmount());
                     assertThat(actual.getStatus()).isEqualTo(order.getStatus());
-                    assertThat(actual.getCreatedAt()).isEqualTo(order.getCreatedAt());
-                    assertThat(actual.getUpdatedAt()).isEqualTo(order.getUpdatedAt());
+                    // Postgres timestamptz stores microsecond precision and rounds (not
+                    // truncates) sub-microsecond nanos, so round the expected value the
+                    // same way before comparing.
+                    assertThat(actual.getCreatedAt()).isEqualTo(roundToMicros(order.getCreatedAt()));
+                    assertThat(actual.getUpdatedAt()).isEqualTo(roundToMicros(order.getUpdatedAt()));
 
                     assertThat(actual.getItems()).hasSameSizeAs(order.getItems());
                     for (int i = 0; i < order.getItems().size(); i++) {

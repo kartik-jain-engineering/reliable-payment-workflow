@@ -2,18 +2,11 @@ package com.ledgerflow;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
 
-/**
- * Entry point for the ledgerflow service.
- *
- * <p>The application is structured as a modular monolith: each business
- * capability lives in its own top-level package (currently just
- * {@code order}) with internal {@code api} / {@code service} / {@code repo}
- * / {@code model} (entity + dto) layers. Module boundaries are enforced by
- * ArchUnit tests rather than by separate Maven modules, keeping deployment
- * simple while the codebase stays decomposable.
- */
+
 @SpringBootApplication
+@ConfigurationPropertiesScan
 public class LedgerflowApplication {
 
     public static void main(String[] args) {
