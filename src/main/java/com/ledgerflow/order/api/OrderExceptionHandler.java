@@ -2,14 +2,16 @@ package com.ledgerflow.order.api;
 
 import java.util.List;
 
+import jakarta.validation.ConstraintViolationException;
+
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.bind.support.WebExchangeBindException;
 
-import com.ledgerflow.order.domain.InvalidStateTransitionException;
-import com.ledgerflow.order.domain.OrderNotFoundException;
+import com.ledgerflow.order.model.InvalidStateTransitionException;
+import com.ledgerflow.order.service.OrderNotFoundException;
 
 /**
  * Translates order failures into HTTP responses.
@@ -51,10 +53,17 @@ public class OrderExceptionHandler {
     }
 
     /**
-     * The aggregate re-checks the same rules the request model validates, so
-     * an {@link IllegalArgumentException} escaping it still means "bad
-     * request" — not a server fault.
+     * {@code OrderService} re-validates every {@code OrderEntity} with a
+     * Bean Validation {@link jakarta.validation.Validator} before writing
+     * it, re-checking the same rules {@code CreateOrderRequest} already
+     * validated at the boundary — so a violation escaping that defence
+     * still means "bad request", not a server fault.
      */
+    @ExceptionHandler(ConstraintViolationException.class)
+    ProblemDetail handleConstraintViolation(ConstraintViolationException ex) {
+        return problem(HttpStatus.BAD_REQUEST, "Invalid order", ex.getMessage());
+    }
+
     @ExceptionHandler(IllegalArgumentException.class)
     ProblemDetail handleInvalidArgument(IllegalArgumentException ex) {
         return problem(HttpStatus.BAD_REQUEST, "Invalid order", ex.getMessage());

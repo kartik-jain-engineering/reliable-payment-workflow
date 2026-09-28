@@ -1,9 +1,12 @@
 package com.ledgerflow.order.api;
 
 import java.math.BigDecimal;
-import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
+
+import jakarta.validation.ConstraintViolationException;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -12,28 +15,25 @@ import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
-import com.ledgerflow.order.application.OrderApplicationService;
-import com.ledgerflow.order.domain.InvalidStateTransitionException;
-import com.ledgerflow.order.domain.Order;
-import com.ledgerflow.order.domain.OrderItem;
-import com.ledgerflow.order.domain.OrderNotFoundException;
-import com.ledgerflow.order.domain.OrderStatus;
+import com.ledgerflow.order.model.InvalidStateTransitionException;
+import com.ledgerflow.order.model.OrderStatus;
+import com.ledgerflow.order.model.entity.OrderEntity;
+import com.ledgerflow.order.model.entity.OrderItemEntity;
+import com.ledgerflow.order.service.OrderNotFoundException;
+import com.ledgerflow.order.service.OrderService;
 
 import reactor.core.publisher.Mono;
 
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
  * Web-layer slice tests for {@link OrderController}.
  *
- * <p>{@link OrderApplicationService} is mocked at the application-service
- * boundary — the only collaborator the controller depends on — so these
- * tests exercise real reactive HTTP parsing, Bean Validation
+ * <p>{@link OrderService} is mocked at the service boundary — the only
+ * collaborator the controller depends on — so these tests exercise real
+ * reactive HTTP parsing, Bean Validation
  * ({@link org.springframework.web.bind.support.WebExchangeBindException} in
  * WebFlux, not MVC's {@code MethodArgumentNotValidException}) and the
  * module-scoped {@link OrderExceptionHandler}, which {@code @WebFluxTest}
@@ -48,18 +48,22 @@ class OrderControllerTest {
     private WebTestClient webTestClient;
 
     @MockBean
-    private OrderApplicationService orderApplicationService;
+    private OrderService orderService;
 
-    private static Order sampleOrder(UUID id, OrderStatus status) {
-        return Order.rehydrate(
-                id,
-                "customer-1",
-                "USD",
-                new BigDecimal("19.98"),
-                status,
-                List.of(new OrderItem("sku-1", 2, new BigDecimal("9.99"))),
-                Instant.parse("2026-01-01T00:00:00Z"),
-                Instant.parse("2026-01-01T00:00:00Z"));
+    private static OrderEntity sampleOrder(UUID id, OrderStatus status) {
+        OffsetDateTime timestamp = OffsetDateTime.parse("2026-01-01T00:00:00Z");
+        return OrderEntity.builder()
+                .id(id)
+                .customerId("customer-1")
+                .currency("USD")
+                .totalAmount(new BigDecimal("19.98"))
+                .statusCode(status.name())
+                .version(0L)
+                .createdAt(timestamp)
+                .updatedAt(timestamp)
+                .items(List.of(OrderItemEntity.builder()
+                        .productId("sku-1").quantity(2).unitPrice(new BigDecimal("9.99")).build()))
+                .build();
     }
 
     private static final String VALID_CREATE_BODY = """
@@ -80,9 +84,8 @@ class OrderControllerTest {
     @Test
     void create_shouldReturn201WithLocationAndBody_onSuccess() {
         UUID orderId = UUID.randomUUID();
-        Order created = sampleOrder(orderId, OrderStatus.CREATED);
-        when(orderApplicationService.create(eq("customer-1"), eq("USD"), eq(new BigDecimal("19.98")), anyList()))
-                .thenReturn(Mono.just(created));
+        OrderEntity created = sampleOrder(orderId, OrderStatus.CREATED);
+        when(orderService.save(any(OrderEntity.class))).thenReturn(Mono.just(created));
 
         webTestClient.post().uri(BASE_URL)
                 .contentType(MediaType.APPLICATION_JSON)
@@ -160,9 +163,9 @@ class OrderControllerTest {
     }
 
     @Test
-    void create_shouldReturn400_whenDomainRejectsInvalidArgument() {
-        when(orderApplicationService.create(anyString(), anyString(), any(BigDecimal.class), anyList()))
-                .thenReturn(Mono.error(new IllegalArgumentException("currency is not a valid ISO 4217 code: ZZZ")));
+    void create_shouldReturn400_whenServiceRejectsAConstraintViolation() {
+        when(orderService.save(any(OrderEntity.class)))
+                .thenReturn(Mono.error(new ConstraintViolationException(Set.of())));
 
         webTestClient.post().uri(BASE_URL)
                 .contentType(MediaType.APPLICATION_JSON)
@@ -180,7 +183,7 @@ class OrderControllerTest {
     @Test
     void get_shouldReturn200WithBody_whenOrderExists() {
         UUID orderId = UUID.randomUUID();
-        when(orderApplicationService.get(orderId)).thenReturn(Mono.just(sampleOrder(orderId, OrderStatus.CREATED)));
+        when(orderService.get(orderId)).thenReturn(Mono.just(sampleOrder(orderId, OrderStatus.CREATED)));
 
         webTestClient.get().uri(BASE_URL + "/{orderId}", orderId)
                 .exchange()
@@ -193,7 +196,7 @@ class OrderControllerTest {
     @Test
     void get_shouldReturn404_whenOrderDoesNotExist() {
         UUID orderId = UUID.randomUUID();
-        when(orderApplicationService.get(orderId)).thenReturn(Mono.error(new OrderNotFoundException(orderId)));
+        when(orderService.get(orderId)).thenReturn(Mono.error(new OrderNotFoundException(orderId)));
 
         webTestClient.get().uri(BASE_URL + "/{orderId}", orderId)
                 .exchange()
@@ -209,7 +212,7 @@ class OrderControllerTest {
     @Test
     void cancel_shouldReturn200WithCancelledOrder_onSuccess() {
         UUID orderId = UUID.randomUUID();
-        when(orderApplicationService.cancel(orderId))
+        when(orderService.cancel(orderId))
                 .thenReturn(Mono.just(sampleOrder(orderId, OrderStatus.CANCELLED)));
 
         webTestClient.post().uri(BASE_URL + "/{orderId}/cancel", orderId)
@@ -218,13 +221,13 @@ class OrderControllerTest {
                 .expectBody()
                 .jsonPath("$.status").isEqualTo("CANCELLED");
 
-        verify(orderApplicationService).cancel(orderId);
+        verify(orderService).cancel(orderId);
     }
 
     @Test
     void cancel_shouldReturn404_whenOrderDoesNotExist() {
         UUID orderId = UUID.randomUUID();
-        when(orderApplicationService.cancel(orderId)).thenReturn(Mono.error(new OrderNotFoundException(orderId)));
+        when(orderService.cancel(orderId)).thenReturn(Mono.error(new OrderNotFoundException(orderId)));
 
         webTestClient.post().uri(BASE_URL + "/{orderId}/cancel", orderId)
                 .exchange()
@@ -236,7 +239,7 @@ class OrderControllerTest {
     @Test
     void cancel_shouldReturn409_whenOrderIsAlreadyCancelled() {
         UUID orderId = UUID.randomUUID();
-        when(orderApplicationService.cancel(orderId))
+        when(orderService.cancel(orderId))
                 .thenReturn(Mono.error(
                         new InvalidStateTransitionException(OrderStatus.CANCELLED, OrderStatus.CANCELLED)));
 
@@ -247,3 +250,4 @@ class OrderControllerTest {
                 .jsonPath("$.title").isEqualTo("Invalid order state transition");
     }
 }
+

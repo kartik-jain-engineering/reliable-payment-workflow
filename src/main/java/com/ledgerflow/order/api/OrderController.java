@@ -14,9 +14,12 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.util.UriComponentsBuilder;
 
-import com.ledgerflow.order.application.OrderApplicationService;
-import com.ledgerflow.order.domain.Order;
+import com.ledgerflow.order.model.dto.CreateOrderRequest;
+import com.ledgerflow.order.model.dto.OrderResponse;
+import com.ledgerflow.order.model.entity.OrderEntity;
+import com.ledgerflow.order.service.OrderService;
 
+import lombok.RequiredArgsConstructor;
 import reactor.core.publisher.Mono;
 
 /**
@@ -32,35 +35,28 @@ import reactor.core.publisher.Mono;
  */
 @RestController
 @RequestMapping(OrderController.BASE_PATH)
+@RequiredArgsConstructor
 public class OrderController {
 
     static final String BASE_PATH = "/api/v1/orders";
 
-    private final OrderApplicationService orderApplicationService;
-
-    public OrderController(OrderApplicationService orderApplicationService) {
-        this.orderApplicationService = orderApplicationService;
-    }
+    private final OrderService orderService;
 
     @PostMapping
     public Mono<ResponseEntity<OrderResponse>> create(@Valid @RequestBody CreateOrderRequest request) {
-        return orderApplicationService.create(
-                        request.customerId(),
-                        request.currency(),
-                        request.totalAmount(),
-                        OrderMapper.toDomainItems(request))
+        return orderService.save(OrderMapper.toNewEntity(request))
                 .map(order -> ResponseEntity.created(locationOf(order)).body(OrderMapper.toResponse(order)));
     }
 
     @GetMapping("/{orderId}")
     public Mono<ResponseEntity<OrderResponse>> get(@PathVariable UUID orderId) {
-        return orderApplicationService.get(orderId)
+        return orderService.get(orderId)
                 .map(order -> ResponseEntity.ok(OrderMapper.toResponse(order)));
     }
 
     @PostMapping("/{orderId}/cancel")
     public Mono<ResponseEntity<OrderResponse>> cancel(@PathVariable UUID orderId) {
-        return orderApplicationService.cancel(orderId)
+        return orderService.cancel(orderId)
                 .map(order -> ResponseEntity.ok(OrderMapper.toResponse(order)));
     }
 
@@ -69,7 +65,7 @@ public class OrderController {
      * {@code ServletUriComponentsBuilder} is servlet-only and has no WebFlux
      * equivalent that reads from a thread-local.
      */
-    private static URI locationOf(Order order) {
+    private static URI locationOf(OrderEntity order) {
         return UriComponentsBuilder.fromPath(BASE_PATH + "/{orderId}")
                 .buildAndExpand(order.getId())
                 .toUri();

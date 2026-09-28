@@ -9,20 +9,18 @@ import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
 import static com.tngtech.archunit.library.dependencies.SlicesRuleDefinition.slices;
 
 /**
- * Basic module-boundary checks for the modular monolith.
+ * Basic module/layer-boundary checks for the modular monolith.
  *
- * <p>These rules are intentionally light for this scaffolding iteration —
- * there is no business code yet, so they mostly assert on the empty
- * {@code package-info.java} skeleton. They exist to fail loudly the moment
- * a future change violates the intended module/layer boundaries, and to be
- * tightened (e.g. restricting cross-module access to {@code application}
- * packages only) as real modules are implemented.
+ * <p>Each top-level package under {@code com.ledgerflow} is a module (only
+ * {@code order} has real code so far), layered internally as {@code api}
+ * (controllers, request/response mapping) → {@code service} (use cases) →
+ * {@code repo} (Spring Data repositories), all depending on {@code model}
+ * (entities, DTOs and enums) — dependencies point inward, and {@code model}
+ * must never depend back out on any of the other three.
  *
- * <p>{@code allowEmptyShould(true)} is set on every rule below because a
- * {@code package-info.java} with no package-level annotation compiles to no
- * class file at all, so right now these packages contain zero classes for
- * ArchUnit to check. Once real classes land in a module, these rules start
- * actually checking them — no changes needed here.
+ * <p>{@code allowEmptyShould(true)} keeps a rule from failing when a module
+ * has no classes in a given layer yet, so these checks stay green for
+ * future modules until they grow real code.
  */
 @AnalyzeClasses(packages = "com.ledgerflow", importOptions = ImportOption.DoNotIncludeTests.class)
 class ModularityArchitectureTest {
@@ -35,16 +33,23 @@ class ModularityArchitectureTest {
                     .allowEmptyShould(true);
 
     @ArchTest
-    static final ArchRule domain_should_not_depend_on_infrastructure =
+    static final ArchRule model_should_not_depend_on_outer_layers =
             noClasses()
-                    .that().resideInAPackage("..domain..")
-                    .should().dependOnClassesThat().resideInAPackage("..infrastructure..")
+                    .that().resideInAPackage("..model..")
+                    .should().dependOnClassesThat().resideInAnyPackage("..api..", "..service..", "..repo..")
                     .allowEmptyShould(true);
 
     @ArchTest
-    static final ArchRule domain_should_not_depend_on_spring_web =
+    static final ArchRule repo_should_not_depend_on_api =
             noClasses()
-                    .that().resideInAPackage("..domain..")
+                    .that().resideInAPackage("..repo..")
+                    .should().dependOnClassesThat().resideInAPackage("..api..")
+                    .allowEmptyShould(true);
+
+    @ArchTest
+    static final ArchRule model_should_not_depend_on_spring_web =
+            noClasses()
+                    .that().resideInAPackage("..model..")
                     .should().dependOnClassesThat().resideInAnyPackage("org.springframework.web..")
                     .allowEmptyShould(true);
 }
