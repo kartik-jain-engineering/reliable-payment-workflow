@@ -25,6 +25,9 @@ bin/
 ### VS Code ###
 .vscode/
 
+### Kilo Code ###
+.kilo/
+
 ### OS ###
 .DS_Store
 Thumbs.db
