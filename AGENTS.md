@@ -8,24 +8,27 @@ touching code.
 ## Build / test
 
 - Windows: `.\gradlew.bat clean build`. Linux/CI: `./gradlew clean build`.
-- `LedgerflowApplicationTests` and `OrderServiceIntegrationTest` need Docker
-  Desktop running (Testcontainers Postgres). Without Docker, scope tests to
-  skip them:
-  ```powershell
-  .\gradlew.bat test --tests "com.ledgerflow.order.model.*" --tests "com.ledgerflow.order.api.*" --tests "com.ledgerflow.order.service.OrderServiceTest" --tests "*Architecture*" --console=plain
-  ```
+- Nine test classes need Docker Desktop running (Testcontainers Postgres) —
+  see [Running tests without Docker](README.md#running-tests-without-docker)
+  in the README for the full list and a working filter command. `order.api`
+  and `payment.api` each mix Docker and non-Docker test classes in the same
+  package, so skip the Docker ones by class name, not package wildcard.
 - Local Postgres for `bootRun`: `docker compose up -d`, then
   `.\gradlew.bat bootRun --args='--spring.profiles.active=local'`.
-- Single deployable; new business modules (`payment`, `ledger`, `idempotency`,
-  `outbox`) go under `com.ledgerflow.<module>` with the same
-  `api` / `service` / `repo` / `model` package layout as `order`.
+- Single deployable; `order`, `payment`, `idempotency` and `outbox` are the
+  business modules with real code so far, each under `com.ledgerflow.<module>`
+  with the same `api` / `service` / `repo` / `model` package layout (`payment`
+  adds a fifth `provider` package; `outbox` has no `api` package since nothing
+  calls it over HTTP). `ledger` is the next business module to add, with the
+  same layout. `common` holds cross-cutting infrastructure (correlation IDs,
+  tracing context) and is deliberately exempt from the four-package layout.
 
 ## Architecture rules (enforced by ArchUnit, `architecture` test package)
 
 - Dependencies point inward only: `api` → `service` → `repo`, all → `model`.
   `model` never depends back out on the other three.
-- Top-level module packages (`order`, and future `payment`/`ledger`/...) must
-  stay free of cross-module cycles.
+- Top-level module packages (`order`, `payment`, `idempotency`, `outbox`, and
+  future modules such as `ledger`) must stay free of cross-module cycles.
 - Breaking either rule fails the build via `ModularityArchitectureTest`, not
   just a lint warning — fix the dependency direction, don't suppress the test.
 

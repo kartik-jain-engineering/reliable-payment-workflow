@@ -27,17 +27,26 @@ real code.
 - Gradle (wrapper committed — no local Gradle install required)
 - PostgreSQL, accessed over R2DBC by the app and over blocking JDBC by Flyway
 - Keycloak, as the local JWT issuer for the OAuth2 resource server (dev only — see `docker-compose.yml`)
+- Resilience4j (reactor + Spring Boot 3 integration), wrapping the payment provider call — see [Resilience](#resilience)
+- Micrometer, `micrometer-tracing-bridge-otel`, `opentelemetry-exporter-logging`, and `micrometer-registry-prometheus`, for correlation/tracing context and metrics — see [Observability](#observability)
+- `logstash-logback-encoder`, for structured JSON logs
 - JUnit 5, Reactor Test, Testcontainers, ArchUnit, spring-security-test
 
 ## Module layout
 
 Single deployable, package-per-module inside `com.ledgerflow`. `order`,
-`payment`, `idempotency` and `outbox` have real code so far:
+`payment`, `idempotency` and `outbox` are the business modules with real
+code so far; `config` and `common` hold cross-cutting infrastructure
+(security, and correlation/tracing context, respectively) rather than
+business logic:
 
 ```
 com.ledgerflow
 ├── config
 │   └── SecurityConfig  the OAuth2 resource server filter chain (scopes, permitted paths)
+├── common
+│   ├── web     CorrelationIdWebFilter — reads/generates X-Correlation-Id
+│   └── config  ContextPropagationConfig, ObservabilityConfig — see Observability
 ├── order
 │   ├── api      REST controllers, the exception handler, and DTO <-> entity mapping
 │   ├── service  use cases (OrderService): orchestrates repo calls, re-validates before writing
@@ -90,8 +99,12 @@ nothing outside `api` may depend on `api`. This is enforced by the ArchUnit
 rules in `src/test/java/.../architecture` (`ModularityArchitectureTest`),
 which also forbid `repo` from depending on `service`/`api`, and keep the
 top-level module packages (currently `order`, `payment`, `idempotency` and
-`outbox`) free of cycles — `ledger` and `common` should follow the same
-four-package layout once they have real code. `payment` is one exception:
+`outbox`) free of cycles — `ledger` should follow the same four-package
+layout once it has real code. `common` is deliberately exempt from that
+layout, since it holds cross-cutting infrastructure rather than a business
+module — see [Explicitly out of scope for this
+iteration](#explicitly-out-of-scope-for-this-iteration) and
+[Observability](#observability). `payment` is one exception:
 it adds a fifth package, `provider`, which those rules don't constrain.
 `outbox` is the other: it has no `api` package at all. `payment.service`
 also depends directly on `order.service.OrderService` to read and
@@ -152,16 +165,25 @@ commands in this README.
 
 ### Running tests without Docker
 
-Three test classes require Docker Desktop to be running, since they start a
-real PostgreSQL container via Testcontainers: `LedgerflowApplicationTests`,
-`OrderServiceIntegrationTest` and `PaymentControllerTest`. Contributors
-without Docker available can run everything else — the entity and
-validation unit tests, the `@WebFluxTest` controller slice, the
-mock-based `PaymentServiceTest`, and the ArchUnit module-boundary checks —
-by targeting those packages instead:
+Nine test classes require Docker Desktop to be running, since they start a
+real PostgreSQL container via Testcontainers (`@SpringBootTest` +
+`@Testcontainers` + `@ServiceConnection`): `LedgerflowApplicationTests`,
+`OrderServiceIntegrationTest`, `OrderControllerOwnershipTest`,
+`PaymentControllerTest`, `PaymentIdempotencyTest`,
+`OutboxAppendAtomicityIntegrationTest`, `OutboxPublisherIntegrationTest`,
+`ResiliencePaymentProviderIntegrationTest`, and `ActuatorSecurityTest`.
+Contributors without Docker available can run everything else — the entity
+and validation unit tests, the `@WebFluxTest` controller/filter slices, the
+mock-based `PaymentServiceTest`, the `ContextPropagationConfigTest` unit
+test, and the ArchUnit module-boundary checks — by targeting those classes
+and packages instead. Note that `order.api` and `payment.api` each mix
+Docker and non-Docker test classes in the same package (`config`'s only
+test class, `ActuatorSecurityTest`, needs Docker), so the Docker-requiring
+classes above must be targeted individually rather than by package
+wildcard:
 
 ```powershell
-.\gradlew.bat test --tests "com.ledgerflow.order.model.*" --tests "com.ledgerflow.order.api.*" --tests "com.ledgerflow.order.service.OrderServiceTest" --tests "com.ledgerflow.payment.model.*" --tests "com.ledgerflow.payment.provider.*" --tests "com.ledgerflow.payment.service.PaymentServiceTest" --tests "*Architecture*" --console=plain
+.\gradlew.bat test --tests "com.ledgerflow.order.model.*" --tests "com.ledgerflow.order.api.OrderControllerTest" --tests "com.ledgerflow.order.service.OrderServiceTest" --tests "com.ledgerflow.payment.model.*" --tests "com.ledgerflow.payment.provider.*" --tests "com.ledgerflow.payment.service.PaymentServiceTest" --tests "com.ledgerflow.payment.api.PaymentControllerSecurityTest" --tests "com.ledgerflow.common.web.CorrelationIdWebFilterTest" --tests "com.ledgerflow.common.config.ContextPropagationConfigTest" --tests "*Architecture*" --console=plain
 ```
 
 ## Configuration profiles
@@ -171,14 +193,19 @@ by targeting those packages instead:
 | `application.yml`         | Base config shared by all profiles                  |
 | `application-local.yml`   | Local dev; sets both the app's `spring.r2dbc.*` URL and Flyway's separate `spring.flyway.*` JDBC URL against `docker-compose` PostgreSQL |
 | `application-test.yml`    | Test profile; both the R2DBC and JDBC connection details are supplied by Testcontainers via `@ServiceConnection` |
+| `application-test-resilience.yml` | Layered on top of `test` for `ResiliencePaymentProviderIntegrationTest`; shortens the Resilience4j timings so the circuit breaker opens within a handful of requests — see [Load and failure testing](#load-and-failure-testing) |
 
 ## Database migrations
 
 Flyway migrations live in `src/main/resources/db/migration`, named
 `V<version>__description.sql`. `V1__initial_schema.sql` is a placeholder;
-`V2__create_orders_schema.sql` creates `orders`/`order_items`, and
+`V2__create_orders_schema.sql` creates `orders`/`order_items`;
 `V3__create_payments_schema.sql` creates `payments` (foreign-keyed to
-`orders.id`).
+`orders.id`); `V4__create_idempotency_keys_schema.sql` creates
+`idempotency_keys` (see [Idempotency](#idempotency)); and
+`V5__create_outbox_events_schema.sql` creates `outbox_events`,
+`outbox_consumed_events` and `outbox_event_receipts` (see [Events and
+reliable publication](#events-and-reliable-publication)).
 
 ## Order API
 
