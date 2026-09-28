@@ -27,6 +27,7 @@ public class SecurityConfig {
                         .pathMatchers(HttpMethod.POST, "/api/v1/payments").hasAuthority("SCOPE_payment:process")
                         .pathMatchers(HttpMethod.GET, "/api/v1/payments/{paymentId}")
                         .hasAuthority("SCOPE_payment:read")
+                        .pathMatchers(HttpMethod.GET, "/actuator/prometheus").authenticated()
                         .anyExchange().denyAll())
                 .oauth2ResourceServer(oauth2 -> oauth2.jwt(Customizer.withDefaults()))
                 .build();

@@ -19,6 +19,7 @@ repositories {
 }
 
 val archunitVersion = "1.3.0"
+val resilience4jVersion = "2.1.0"
 
 dependencies {
     // Core
@@ -36,6 +37,15 @@ dependencies {
     runtimeOnly("org.postgresql:r2dbc-postgresql")
     // Flyway is blocking JDBC, so the JDBC driver stays even though the app is reactive.
     runtimeOnly("org.postgresql:postgresql")
+
+    // Resilience / observability
+    implementation("io.github.resilience4j:resilience4j-reactor:$resilience4jVersion")
+    implementation("io.github.resilience4j:resilience4j-spring-boot3:$resilience4jVersion")
+    implementation("io.micrometer:micrometer-core")
+    implementation("io.micrometer:micrometer-tracing-bridge-otel")
+    implementation("io.opentelemetry:opentelemetry-exporter-logging")
+    runtimeOnly("io.micrometer:micrometer-registry-prometheus")
+    implementation("net.logstash.logback:logstash-logback-encoder:7.4")
 
     // Test
     testImplementation("org.springframework.boot:spring-boot-starter-test")

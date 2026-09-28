@@ -1,9 +1,11 @@
 package com.ledgerflow.payment.service;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.TimeoutException;
 
 import jakarta.validation.ConstraintViolationException;
 import jakarta.validation.Validation;
@@ -27,6 +29,10 @@ import com.ledgerflow.payment.provider.PaymentProvider;
 import com.ledgerflow.payment.provider.PaymentProviderTimeoutException;
 import com.ledgerflow.payment.repo.PaymentRepository;
 
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.retry.Retry;
+import io.github.resilience4j.retry.RetryConfig;
+import io.github.resilience4j.timelimiter.TimeLimiter;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
@@ -54,8 +60,15 @@ class PaymentServiceTest {
     private final OrderService orderService = mock(OrderService.class);
     private final PaymentProvider paymentProvider = mock(PaymentProvider.class);
     private final OutboxService outboxService = mock(OutboxService.class);
-    private final PaymentService service =
-            new PaymentService(paymentRepository, orderService, paymentProvider, outboxService, validator);
+    private final PaymentService service = new PaymentService(
+            paymentRepository, orderService, paymentProvider, outboxService, validator,
+            TimeLimiter.of(Duration.ofSeconds(1)),
+            Retry.of("paymentProvider", RetryConfig.custom()
+                    .maxAttempts(2)
+                    .waitDuration(Duration.ofMillis(50))
+                    .retryExceptions(PaymentProviderTimeoutException.class, TimeoutException.class)
+                    .build()),
+            CircuitBreaker.ofDefaults("paymentProvider"));
 
     @BeforeAll
     static void setUpValidator() {

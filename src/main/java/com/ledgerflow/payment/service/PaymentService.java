@@ -2,6 +2,7 @@ package com.ledgerflow.payment.service;
 
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.TimeoutException;
 
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.ConstraintViolationException;
@@ -25,6 +26,12 @@ import com.ledgerflow.payment.provider.PaymentProvider;
 import com.ledgerflow.payment.provider.PaymentProviderTimeoutException;
 import com.ledgerflow.payment.repo.PaymentRepository;
 
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.reactor.circuitbreaker.operator.CircuitBreakerOperator;
+import io.github.resilience4j.reactor.retry.RetryOperator;
+import io.github.resilience4j.reactor.timelimiter.TimeLimiterOperator;
+import io.github.resilience4j.retry.Retry;
+import io.github.resilience4j.timelimiter.TimeLimiter;
 import lombok.RequiredArgsConstructor;
 import reactor.core.publisher.Mono;
 
@@ -37,6 +44,9 @@ public class PaymentService {
     private final PaymentProvider paymentProvider;
     private final OutboxService outboxService;
     private final Validator validator;
+    private final TimeLimiter paymentProviderTimeLimiter;
+    private final Retry paymentProviderRetry;
+    private final CircuitBreaker paymentProviderCircuitBreaker;
 
     @Transactional
     public Mono<PaymentEntity> authorize(UUID orderId, SimulatedOutcome simulateOutcome) {
@@ -83,12 +93,19 @@ public class PaymentService {
     }
 
     private Mono<PaymentEntity> settle(PaymentEntity payment, OrderEntity order, SimulatedOutcome simulateOutcome) {
-        return paymentProvider.authorize(payment, simulateOutcome)
+        return Mono.defer(() -> paymentProvider.authorize(payment, simulateOutcome))
+                .transformDeferred(TimeLimiterOperator.of(paymentProviderTimeLimiter))
+                .transformDeferred(RetryOperator.of(paymentProviderRetry))
+                .transformDeferred(CircuitBreakerOperator.of(paymentProviderCircuitBreaker))
                 .flatMap(result -> result == PaymentAuthorizationResult.AUTHORIZED
                         ? complete(payment, PaymentStatus.AUTHORIZED, order, OrderStatus.CONFIRMED)
                         : complete(payment, PaymentStatus.DECLINED, order, OrderStatus.FAILED))
-                .onErrorResume(PaymentProviderTimeoutException.class,
+                .onErrorResume(PaymentService::isProviderTimeout,
                         ex -> complete(payment, PaymentStatus.TIMED_OUT, order, OrderStatus.FAILED));
+    }
+
+    private static boolean isProviderTimeout(Throwable ex) {
+        return ex instanceof PaymentProviderTimeoutException || ex instanceof TimeoutException;
     }
 
     private Mono<PaymentEntity> complete(

@@ -9,10 +9,39 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,prometheus
   endpoint:
     health:
       show-details: when-authorized
+  tracing:
+    sampling:
+      probability: 1.0
+
+resilience4j:
+  timelimiter:
+    instances:
+      paymentProvider:
+        timeoutDuration: 5s
+        cancelRunningFuture: true
+  retry:
+    instances:
+      paymentProvider:
+        maxAttempts: 3
+        waitDuration: 1s
+        retryExceptions:
+          - com.ledgerflow.payment.provider.PaymentProviderTimeoutException
+          - java.util.concurrent.TimeoutException
+  circuitbreaker:
+    instances:
+      paymentProvider:
+        failureRateThreshold: 50
+        slowCallDurationThreshold: 2s
+        permittedNumberOfCallsInHalfOpenState: 3
+        automaticTransitionFromOpenToHalfOpenEnabled: true
+        waitDurationInOpenState: 60s
+        recordExceptions:
+          - com.ledgerflow.payment.provider.PaymentProviderTimeoutException
+          - java.util.concurrent.TimeoutException
 
 ledgerflow:
   idempotency:

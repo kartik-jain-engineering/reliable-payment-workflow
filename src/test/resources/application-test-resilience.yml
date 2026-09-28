@@ -1,0 +1,18 @@
+resilience4j:
+  timelimiter:
+    instances:
+      paymentProvider:
+        timeoutDuration: 1s
+  retry:
+    instances:
+      paymentProvider:
+        maxAttempts: 2
+        waitDuration: 50ms
+  circuitbreaker:
+    instances:
+      paymentProvider:
+        failureRateThreshold: 50
+        waitDurationInOpenState: 100ms
+        permittedNumberOfCallsInHalfOpenState: 2
+        slidingWindowSize: 4
+        minimumNumberOfCalls: 4

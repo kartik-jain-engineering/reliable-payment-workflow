@@ -17,6 +17,8 @@ import com.ledgerflow.payment.model.InvalidStateTransitionException;
 import com.ledgerflow.payment.service.OrderNotPayableException;
 import com.ledgerflow.payment.service.PaymentNotFoundException;
 
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
+
 @RestControllerAdvice(basePackages = "com.ledgerflow.payment")
 public class PaymentExceptionHandler {
 
@@ -50,6 +52,12 @@ public class PaymentExceptionHandler {
     @ExceptionHandler(OrderNotPayableException.class)
     ProblemDetail handleOrderNotPayable(OrderNotPayableException ex) {
         return problem(HttpStatus.CONFLICT, "Order not payable", ex.getMessage());
+    }
+
+    @ExceptionHandler(CallNotPermittedException.class)
+    ProblemDetail handleCircuitOpen(CallNotPermittedException ex) {
+        return problem(HttpStatus.SERVICE_UNAVAILABLE, "Payment service temporarily unavailable",
+                "The payment provider circuit breaker is open due to recent failures; retry later");
     }
 
     @ExceptionHandler(WebExchangeBindException.class)

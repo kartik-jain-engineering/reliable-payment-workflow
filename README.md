@@ -105,6 +105,13 @@ rule (`outbox_should_not_depend_on_other_modules`) forbids `outbox` from
 depending back on `order`, `payment` or `idempotency`. `PaymentEntity` also
 reuses `order`'s `@ValidCurrencyCode` constraint rather than duplicating it.
 
+## Architecture
+
+Context/container and order-to-payment-to-outbox sequence diagrams live in
+[`docs/architecture.md`](docs/architecture.md), kept separate from this
+README since both are easier to keep current as standalone Mermaid diagrams
+than embedded inline.
+
 ## Running locally
 
 Start PostgreSQL and Keycloak:
@@ -496,17 +503,36 @@ What this does **not** protect against:
   independent, so a new service method that forgets to call
   `requireOwnedBy` (or the payment-side equivalent) would compile and pass
   the scope check while skipping ownership entirely.
+- There is no rate limiting anywhere in `SecurityConfig` or elsewhere —
+  neither on authentication attempts against Keycloak nor on any
+  `/api/v1/**` route. A caller with (or without) a valid token can retry as
+  fast as the server accepts connections.
+- The payment provider circuit breaker (see
+  [Resilience](#resilience)) is a new potential denial-of-service surface:
+  it is keyed globally (one `CircuitBreaker` instance,
+  `Resilience4jConfig.PAYMENT_PROVIDER`, shared by every caller), not
+  per-customer or per-order. Any authenticated caller who can cheaply
+  trigger enough `TIMEOUT`-outcome payment attempts to cross
+  `failureRateThreshold` trips the breaker for every other customer too,
+  who then get `503` on `POST /api/v1/payments` until
+  `waitDurationInOpenState` elapses. This is a genuine gap, not something
+  this iteration mitigates — a per-customer breaker or rate limit ahead of
+  the payment endpoint would be the fix.
 
 ### Logging
 
 JWTs, the `Authorization` header, the `Idempotency-Key` header, and
-request/response bodies must never be logged. As of this iteration, no
-code under `src/main` logs anything at all — a grep for `log.`, `@Slf4j`,
-`Logger`, and `System.out` across `src/main` returns no matches. However,
-both `application-local.yml` and `application-test.yml` set
-`logging.level.com.ledgerflow: DEBUG`, so any logging statement added
-later under `com.ledgerflow` at `DEBUG` or above must not include these
-values.
+request/response bodies must never be logged. `OutboxPublisher` is
+currently the only class under `src/main` that logs anything — `log.warn`/
+`log.error` on publish failures, always with the event id and event type,
+never a payload — a grep for `log.`, `@Slf4j`, `Logger`, and `System.out`
+across `src/main` returns no other matches. Both `application-local.yml`
+and `application-test.yml` set `logging.level.com.ledgerflow: DEBUG`, so any
+logging statement added later under `com.ledgerflow` at `DEBUG` or above
+must not include these values. Every log line, from every logger, also now
+carries `correlationId`/`traceId`/`spanId` via MDC — see
+[Observability](#observability) — none of which identify the caller beyond
+what the caller itself supplied in the `X-Correlation-Id` header.
 
 ### Local Keycloak vs. tests
 
@@ -717,7 +743,209 @@ is no Kafka or other message broker in front of `outbox_events`, and no
 notification/webhook module consumes these events yet — see [Explicitly
 out of scope for this iteration](#explicitly-out-of-scope-for-this-iteration).
 
+## Resilience
+
+`PaymentService.settle` wraps every call to `PaymentProvider.authorize(...)`
+in a three-layer Resilience4j chain. Each `transformDeferred` wraps the
+Mono built so far, so the effective call order is:
+
+```
+paymentProvider.authorize(...)
+  → TimeLimiterOperator    times out a call running longer than the configured duration
+  → RetryOperator          retries a timed-out call
+  → CircuitBreakerOperator records the outcome of the whole retried call, and can
+                            short-circuit future calls without invoking the provider at all
+```
+
+All three Resilience4j instances share one name,
+`Resilience4jConfig.PAYMENT_PROVIDER` (`"paymentProvider"`), which is also the
+`resilience4j.*.instances` key in `application.yml`:
+
+| Layer | Property | Value |
+|---|---|---|
+| Time limiter | `timeoutDuration` | `5s` |
+| Time limiter | `cancelRunningFuture` | `true` |
+| Retry | `maxAttempts` | `3` |
+| Retry | `waitDuration` | `1s` |
+| Retry | `retryExceptions` | `PaymentProviderTimeoutException`, `java.util.concurrent.TimeoutException` |
+| Circuit breaker | `failureRateThreshold` | `50` (%) |
+| Circuit breaker | `slowCallDurationThreshold` | `2s` |
+| Circuit breaker | `waitDurationInOpenState` | `60s` |
+| Circuit breaker | `permittedNumberOfCallsInHalfOpenState` | `3` |
+| Circuit breaker | `automaticTransitionFromOpenToHalfOpenEnabled` | `true` |
+| Circuit breaker | `recordExceptions` | same two exception types as `retryExceptions` |
+
+Sliding window size and minimum number of calls are not overridden in
+`application.yml`, so the circuit breaker uses Resilience4j's own defaults
+for those two settings.
+
+### A decline is not a failure
+
+`FakePaymentProvider.authorize` returns a normal
+`Mono<PaymentAuthorizationResult>` value for both the `AUTHORIZED` and
+`DECLINED` outcomes — `DECLINED` is never signalled as an error. Retry and
+the circuit breaker only react to exceptions matching
+`retryExceptions`/`recordExceptions` above, so a `DECLINE` result is never
+retried and never counts against the circuit breaker's failure rate; it
+flows straight into `PaymentService.complete`, the same path a successful
+authorization takes. Only the `TIMEOUT` simulated outcome
+(`PaymentProviderTimeoutException`, thrown immediately by
+`FakePaymentProvider` — not an actual elapsed-time timeout) and a real
+time-limiter timeout (`java.util.concurrent.TimeoutException`) are retried
+and recorded as failures. `PaymentService.isProviderTimeout` is what
+`settle`'s `onErrorResume` uses to route either exception type to a
+`TIMED_OUT` payment once retries are exhausted.
+
+### Circuit breaker open: no payment row, and the idempotency claim is freed
+
+`PaymentService.pay` inserts the `PENDING` payment row *before* calling
+`settle`, inside the same `@Transactional` `authorize` method. If the
+circuit breaker is `OPEN`, `CircuitBreakerOperator` fails with
+`CallNotPermittedException` before the provider (or the retry/time-limiter
+layers) are invoked at all. That exception is not caught by `settle`'s
+`onErrorResume`, which only handles the two timeout exception types above,
+so it propagates out of the transactional `authorize` method and the
+transaction — including the `PENDING` payment insert — rolls back: no
+payment row exists for that attempt.
+
+`PaymentExceptionHandler.handleCircuitOpen` maps `CallNotPermittedException`
+to `503 Service Unavailable`. Because the whole `authorize` call failed, the
+`Idempotency-Key` claim wrapping it also fails, and
+`IdempotencyService.perform` deletes the claimed key row instead of marking
+it `COMPLETED` — see [Idempotency](#idempotency) — so a client retrying with
+the same `Idempotency-Key` after a `503` is treated as a fresh attempt, not
+a replay.
+
+### Failure matrix
+
+| Provider outcome / resilience state | Payment status | Order status | HTTP response |
+|---|---|---|---|
+| `SUCCESS` (or omitted) | `AUTHORIZED` | `CONFIRMED` | `201 Created` |
+| `DECLINE` | `DECLINED` | `FAILED` | `201 Created` |
+| `TIMEOUT` (retried up to `maxAttempts`, `1s` apart, still fails) | `TIMED_OUT` | `FAILED` | `201 Created` |
+| Circuit breaker `OPEN` (`CallNotPermittedException`, provider never called) | none — transaction rolled back | unchanged (`PAYMENT_PENDING`) | `503 Service Unavailable` |
+
+A real time-limiter timeout — the provider call itself running past `5s` —
+is handled the same way as `TIMEOUT` above, since
+`java.util.concurrent.TimeoutException` is in both `retryExceptions` and
+`recordExceptions`. `FakePaymentProvider` never actually runs long enough to
+trigger this in production config; it's exercised in the test suite with a
+shorter test-profile `timeoutDuration` instead (see below).
+
+### Load and failure testing
+
+Verified by `ResiliencePaymentProviderIntegrationTest`
+(`src/test/java/com/ledgerflow/payment/resilience`), a full-stack test
+against a real Testcontainers PostgreSQL instance, run under the
+`test`/`test-resilience` profiles (`application-test-resilience.yml`
+shortens `timeoutDuration` to `1s`, `waitDuration` to `50ms`,
+`waitDurationInOpenState` to `100ms`, and sets `slidingWindowSize`/
+`minimumNumberOfCalls` to `4` so the circuit breaker opens within a handful
+of requests instead of Resilience4j's much larger default). `PaymentProvider`
+is `@SpyBean`-wrapped so invocation counts prove retry/short-circuit
+behavior directly, and the real `CircuitBreaker` bean is inspected rather
+than inferred from HTTP status alone. It covers:
+
+- A `DECLINE` outcome invokes the provider exactly once and is never
+  retried; the order ends `FAILED`.
+- A transient real time-limiter timeout (provider delayed past the 1s test
+  `timeoutDuration` once, then fast) is retried exactly once and the second
+  attempt succeeds; the order ends `CONFIRMED`.
+- Four consecutive provider failures (`PaymentProviderTimeoutException`)
+  open the circuit breaker; the next call short-circuits with `503`,
+  invokes the provider zero times, and leaves the payment row count
+  unchanged — confirming the transaction rollback described above.
+- After `waitDurationInOpenState` elapses, the breaker automatically moves
+  to `HALF_OPEN`; `permittedNumberOfCallsInHalfOpenState` (`2` in the test
+  profile) successful calls close it again.
+
+The test-resilience profile's timing values are tuned for test speed only —
+production `application.yml` values are the ones in the table above.
+
+## Observability
+
+### Correlation IDs
+
+`CorrelationIdWebFilter` (`com.ledgerflow.common.web`, ordered at
+`Ordered.HIGHEST_PRECEDENCE`) runs before every other filter. For each
+request it reads the `X-Correlation-Id` header; if present and matching
+`[A-Za-z0-9._-]{1,128}` it's reused, otherwise a new `UUID.randomUUID()` is
+generated. The value is echoed back on the response's `X-Correlation-Id`
+header and written into the Reactor `Context` under the key `correlationId`
+(`CorrelationIdWebFilter.CONTEXT_KEY`).
+
+`ContextPropagationConfig` registers a Micrometer `ContextRegistry`
+`ThreadLocalAccessor` for that same key, backed by SLF4J's `MDC`, and calls
+`Hooks.enableAutomaticContextPropagation()`. This is what moves the
+correlation id from the Reactor `Context` (set once, per request, by the
+filter) into `MDC` (thread-local, read by the logging encoder) as execution
+hops across the WebFlux/Reactor thread pool, without any per-log-statement
+plumbing elsewhere in the codebase.
+
+### Structured logs
+
+`logback-spring.xml` uses `logstash-logback-encoder`'s `LogstashEncoder` for
+every profile except `local`, configured to include exactly three MDC keys —
+`correlationId`, `traceId`, `spanId` — alongside the encoder's own default
+fields. A representative line:
+
+```json
+{
+  "@timestamp": "2026-09-28T10:16:00.123+00:00",
+  "@version": "1",
+  "message": "Outbox event 1a2b3c4d-0000-4b8a-9c2c-2c7a9b1f0a22 (PaymentAuthorized) failed to publish",
+  "logger_name": "com.ledgerflow.outbox.service.OutboxPublisher",
+  "thread_name": "reactor-http-nio-2",
+  "level": "WARN",
+  "level_value": 30000,
+  "correlationId": "5b1f6c2e-1111-4b8a-9c2c-2c7a9b1f0a01",
+  "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "spanId": "00f067aa0ba902b7"
+}
+```
+
+Under the `local` profile, the same three values are printed as plain text
+instead — `%X{correlationId:-},%X{traceId:-},%X{spanId:-}` in the console
+pattern — with `-` where a value is unset.
+
+### Tracing via logs, not a tracing backend
+
+There is no Zipkin/Tempo/Jaeger in this iteration — `docker-compose.yml` has
+no tracing service, and no OTLP exporter is configured. `ObservabilityConfig`
+registers a `LoggingSpanExporter` bean
+(`io.opentelemetry:opentelemetry-exporter-logging`), and
+`micrometer-tracing-bridge-otel` bridges Micrometer's tracing API to
+OpenTelemetry underneath it. `management.tracing.sampling.probability` is
+`1.0`, so every request is sampled. In practice this means the `traceId`/
+`spanId` MDC values on every log line (see above) are the only place trace
+context surfaces today — correlating log lines for one request or one
+downstream call still works, but there is no span timeline or dependency
+graph to view. Wiring a real backend (e.g. Tempo, Zipkin) would mean adding
+an OTLP exporter and pointing it somewhere; nothing here does that yet.
+
+### `/actuator/prometheus`
+
+`micrometer-registry-prometheus` is now on the runtime classpath, and
+`management.endpoints.web.exposure.include` in `application.yml` adds
+`prometheus` alongside `health`/`info`. Unlike those two, `/actuator/prometheus`
+is not in `SecurityConfig`'s `permitAll()` list — it requires a valid JWT
+(`.pathMatchers(HttpMethod.GET, "/actuator/prometheus").authenticated()`,
+no specific scope):
+
+```bash
+curl http://localhost:8080/actuator/prometheus \
+  -H "Authorization: Bearer <token>"
+```
+
 ## Design decisions
+
+Three of the decisions below are also written up as ADRs in
+[`docs/adr/`](docs/adr/): [R2DBC over JPA](docs/adr/0001-r2dbc-over-jpa.md),
+[the transactional outbox before any message
+broker](docs/adr/0002-transactional-outbox-before-message-broker.md), and
+[a database unique constraint as the concurrency
+mutex](docs/adr/0003-unique-constraint-as-concurrency-mutex.md), reused for
+both idempotency claiming and outbox consumption.
 
 - **WebFlux + R2DBC, not MVC + JPA.** The `order` module is built reactively
   end to end — controller, service and repositories all return
@@ -863,7 +1091,15 @@ out of scope for this iteration](#explicitly-out-of-scope-for-this-iteration).
   service is dev-only (`start-dev`, no persistent realm export) and
   requires manual realm/client/user provisioning — see [Trust
   boundaries](#trust-boundaries).
-- The `ledger` and `common` module packages: removed rather than kept as
-  empty scaffolding, since they have no code yet. Re-add them with the
-  same layout as `order`, `payment`, `idempotency` and `outbox` once they
-  have real behaviour.
+- The `ledger` module package: removed rather than kept as empty
+  scaffolding, since it has no code yet. Re-add it with the same
+  `api`/`service`/`repo`/`model` layout as `order`, `payment`,
+  `idempotency` and `outbox` once it has real behaviour.
+- `common` now exists (`common.web.CorrelationIdWebFilter`,
+  `common.config.ContextPropagationConfig`/`ObservabilityConfig` — see
+  [Observability](#observability)), but as cross-cutting infrastructure,
+  not a business module — it has no `api`/`service`/`repo`/`model` split,
+  and `common_should_not_depend_on_business_modules`
+  (`ModularityArchitectureTest`) only forbids it from depending on
+  `order`/`payment`/`idempotency`/`outbox`, the same one-way rule the other
+  modules get.

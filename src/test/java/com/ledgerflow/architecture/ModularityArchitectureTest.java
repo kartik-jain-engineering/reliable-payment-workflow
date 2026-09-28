@@ -67,6 +67,14 @@ class ModularityArchitectureTest {
                             "com.ledgerflow.order..", "com.ledgerflow.payment..", "com.ledgerflow.idempotency..");
 
     @ArchTest
+    static final ArchRule common_should_not_depend_on_business_modules =
+            noClasses()
+                    .that().resideInAPackage("com.ledgerflow.common..")
+                    .should().dependOnClassesThat().resideInAnyPackage(
+                            "com.ledgerflow.order..", "com.ledgerflow.payment..",
+                            "com.ledgerflow.idempotency..", "com.ledgerflow.outbox..");
+
+    @ArchTest
     static final ArchRule model_should_not_depend_on_spring_web =
             noClasses()
                     .that().resideInAPackage("..model..")

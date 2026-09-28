@@ -19,6 +19,22 @@ ledgerflow:
     publisher:
       enabled: false
 
+resilience4j:
+  timelimiter:
+    instances:
+      paymentProvider:
+        timeoutDuration: 1s
+  retry:
+    instances:
+      paymentProvider:
+        maxAttempts: 2
+        waitDuration: 50ms
+  circuitbreaker:
+    instances:
+      paymentProvider:
+        waitDurationInOpenState: 100ms
+        permittedNumberOfCallsInHalfOpenState: 2
+
 logging:
   level:
     com.ledgerflow: DEBUG
