@@ -20,6 +20,7 @@ import com.ledgerflow.order.model.entity.OrderEntity;
 import com.ledgerflow.order.model.entity.OrderItemEntity;
 import com.ledgerflow.order.repo.OrderItemRepository;
 import com.ledgerflow.order.repo.OrderRepository;
+import com.ledgerflow.outbox.service.OutboxService;
 
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -47,7 +48,9 @@ class OrderServiceTest {
 
     private final OrderRepository orderRepository = mock(OrderRepository.class);
     private final OrderItemRepository orderItemRepository = mock(OrderItemRepository.class);
-    private final OrderService service = new OrderService(orderRepository, orderItemRepository, validator);
+    private final OutboxService outboxService = mock(OutboxService.class);
+    private final OrderService service =
+            new OrderService(orderRepository, orderItemRepository, outboxService, validator);
 
     @BeforeAll
     static void setUpValidator() {
@@ -99,6 +102,7 @@ class OrderServiceTest {
         when(orderItemRepository.save(any(OrderItemEntity.class)))
                 .thenAnswer(invocation -> Mono.just(invocation.getArgument(0)));
         when(orderItemRepository.deleteByOrderId(any(UUID.class))).thenReturn(Mono.empty());
+        when(outboxService.append(any())).thenReturn(Mono.empty());
     }
 
     // ---------------------------------------------------------------

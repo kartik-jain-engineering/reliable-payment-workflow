@@ -6,15 +6,18 @@ requests, transactional outbox for events, auditable ledger postings).
 **Status:** the `order` module has a working create / fetch / cancel API,
 and the `payment` module can authorize a payment for an order that is
 already `PAYMENT_PENDING`, driving the order to `CONFIRMED` on success or
-`FAILED` on decline/timeout — both backed by PostgreSQL. Every `order` and
-`payment` endpoint requires a JWT bearer token and a per-route OAuth2
-scope, plus a resource-ownership check tying orders and payments to the
-JWT subject — see [Trust boundaries](#trust-boundaries). `POST
-/api/v1/payments` also requires an `Idempotency-Key` header, handled by
-the `idempotency` module — see [Idempotency](#idempotency). `ledger` and
-`outbox` are not built yet; they will follow the same `api` / `service` /
-`repo` / `model` package layout as `order`, `payment` and `idempotency`
-once they have real code.
+`FAILED` on decline/timeout — both backed by PostgreSQL. Every order
+creation and payment settlement also appends a domain event to the
+`outbox` module in the same database transaction as the business write —
+see [Events and reliable publication](#events-and-reliable-publication).
+Every `order` and `payment` endpoint requires a JWT bearer token and a
+per-route OAuth2 scope, plus a resource-ownership check tying orders and
+payments to the JWT subject — see [Trust boundaries](#trust-boundaries).
+`POST /api/v1/payments` also requires an `Idempotency-Key` header, handled
+by the `idempotency` module — see [Idempotency](#idempotency). `ledger` is
+not built yet; it will follow the same `api` / `service` / `repo` /
+`model` package layout as `order`, `payment` and `idempotency` once it has
+real code.
 
 ## Stack
 
@@ -29,7 +32,7 @@ once they have real code.
 ## Module layout
 
 Single deployable, package-per-module inside `com.ledgerflow`. `order`,
-`payment` and `idempotency` have real code so far:
+`payment`, `idempotency` and `outbox` have real code so far:
 
 ```
 com.ledgerflow
@@ -53,34 +56,54 @@ com.ledgerflow
 │       ├── (PaymentStatus, SimulatedOutcome, InvalidStateTransitionException)
 │       ├── entity  Spring Data R2DBC entity (PaymentEntity)
 │       └── dto     API request/response records (AuthorizePaymentRequest, PaymentResponse)
-└── idempotency
-    ├── api      IdempotencyExceptionHandler only — idempotency has no controllers of its
-    │            own; its exceptions surface from other modules' endpoints
-    ├── service  IdempotencyService: claims/replays keys by Idempotency-Key + request hash;
-    │            IdempotencyProperties (poll retry/backoff config)
-    ├── repo     IdempotencyKeyRepository (Spring Data ReactiveCrudRepository)
+├── idempotency
+│   ├── api      IdempotencyExceptionHandler only — idempotency has no controllers of its
+│   │            own; its exceptions surface from other modules' endpoints
+│   ├── service  IdempotencyService: claims/replays keys by Idempotency-Key + request hash;
+│   │            IdempotencyProperties (poll retry/backoff config)
+│   ├── repo     IdempotencyKeyRepository (Spring Data ReactiveCrudRepository)
+│   └── model
+│       ├── IdempotencyKeyStatus
+│       └── entity  Spring Data R2DBC entity (IdempotencyKeyEntity)
+└── outbox
+    ├── service
+    │   ├── OutboxService              appends event rows (called from other modules' transactions)
+    │   ├── OutboxPublisher / OutboxPublisherScheduler   polls PENDING rows and dispatches them
+    │   ├── OutboxEventDispatcher      claims (handler_name, event_id) and invokes handlers
+    │   ├── OutboxEventHandler         interface implemented by each consumer
+    │   ├── OutboxProperties           `ledgerflow.outbox.publisher.*` binding
+    │   └── handler  EventReceiptRecorder and the three per-event-type receipt handlers
+    ├── repo     OutboxEventRepository, OutboxConsumedEventRepository, OutboxEventReceiptRepository
     └── model
-        ├── IdempotencyKeyStatus
-        └── entity  Spring Data R2DBC entity (IdempotencyKeyEntity)
+        ├── OutboxEventStatus
+        ├── event   DomainEvent, OrderCreatedEvent, PaymentAuthorizedEvent, PaymentDeclinedEvent
+        └── entity  OutboxEventEntity, OutboxConsumedEventEntity, OutboxEventReceiptEntity
 ```
+
+`outbox` has no `api` package — nothing calls it over HTTP; `order` and
+`payment` call `OutboxService` directly. See [Events and reliable
+publication](#events-and-reliable-publication).
 
 Dependencies point inward: `api` → `service` → `repo`, all depending on
 `model`; `model` never depends back out on any of the other three, and
 nothing outside `api` may depend on `api`. This is enforced by the ArchUnit
 rules in `src/test/java/.../architecture` (`ModularityArchitectureTest`),
 which also forbid `repo` from depending on `service`/`api`, and keep the
-top-level module packages (currently `order`, `payment` and `idempotency`)
-free of cycles — `ledger`, `outbox` and `common` should follow the same
-four-package layout once they have real code. `payment` is the one
-exception: it adds a fifth package, `provider`, which those rules don't
-constrain. `payment.service` also depends directly on
-`order.service.OrderService` to read and transition orders, and
-`payment.api.PaymentController` depends on
+top-level module packages (currently `order`, `payment`, `idempotency` and
+`outbox`) free of cycles — `ledger` and `common` should follow the same
+four-package layout once they have real code. `payment` is one exception:
+it adds a fifth package, `provider`, which those rules don't constrain.
+`outbox` is the other: it has no `api` package at all. `payment.service`
+also depends directly on `order.service.OrderService` to read and
+transition orders, and `payment.api.PaymentController` depends on
 `idempotency.service.IdempotencyService` to wrap payment authorization — a
 dedicated ArchUnit rule (`idempotency_should_not_depend_on_business_modules`)
 forbids the reverse, so `idempotency` may never depend on `order` or
-`payment`. `PaymentEntity` also reuses `order`'s `@ValidCurrencyCode`
-constraint rather than duplicating it.
+`payment`. `order.service.OrderService` and `payment.service.PaymentService`
+both depend on `outbox.service.OutboxService` to append events; a matching
+rule (`outbox_should_not_depend_on_other_modules`) forbids `outbox` from
+depending back on `order`, `payment` or `idempotency`. `PaymentEntity` also
+reuses `order`'s `@ValidCurrencyCode` constraint rather than duplicating it.
 
 ## Running locally
 
@@ -564,6 +587,136 @@ Conflict` (`IdempotencyKeyInProgressException`) until the row is removed
 manually. A lease/expiry column on the claim is the intended fix, not yet
 implemented.
 
+## Events and reliable publication
+
+`order` and `payment` writes append a domain event to the `outbox` module
+instead of calling any consumer directly. `OutboxService.append` is
+`@Transactional(propagation = Propagation.MANDATORY)` — it fails if no
+transaction is already active — so it can only ever run inside the
+caller's own `@Transactional` method, never on its own.
+
+### Domain events
+
+Three events exist so far, all implementing `outbox.model.event.DomainEvent`
+and all at schema version `1` (each record's `SCHEMA_VERSION` constant):
+
+| Event | `event_type` | Appended from | Payload |
+|---|---|---|---|
+| `OrderCreatedEvent` | `OrderCreated` | `OrderService.save`, only when the order being saved `isNew()` (not on later updates, e.g. `cancel`) | `orderId`, `customerId`, `totalAmount`, `currency`, `status`, `createdAt` |
+| `PaymentAuthorizedEvent` | `PaymentAuthorized` | `PaymentService.complete`, when the payment settles as `AUTHORIZED` | `paymentId`, `orderId`, `customerId`, `amount`, `currency`, `status`, `authorizedAt` |
+| `PaymentDeclinedEvent` | `PaymentDeclined` | `PaymentService.complete`, when the payment settles as `DECLINED` **or** `TIMED_OUT` | `paymentId`, `orderId`, `customerId`, `amount`, `currency`, `status`, `declinedAt` |
+
+`PaymentDeclinedEvent` is emitted for both terminal failure outcomes (see
+[Simulated outcomes](#simulated-outcomes)) — a consumer tells them apart by
+the payload's `status` field, which carries `payment.getStatusCode()`
+(`"DECLINED"` or `"TIMED_OUT"`, the `PaymentStatus` enum name), not by a
+different `event_type`.
+
+### Same-transaction write
+
+`OutboxService.append` inserts into `outbox_events` from inside the same
+`@Transactional` method that writes the order or payment row —
+`OrderService.save` and `PaymentService.complete` (called from
+`PaymentService.authorize`) both call it before returning. This guarantees
+that if the business write commits, its event row also commits and is
+never lost, and if the business write rolls back, no event row exists
+either. It does **not** guarantee that the event is published immediately:
+publication happens later, asynchronously, via the poller described below.
+It also does not guarantee cross-event ordering beyond whatever
+`OutboxEventRepository.findPendingBatch`'s `ORDER BY created_at, id`
+produces, and there is no external broker in this codebase yet — publish
+means invoking in-process `OutboxEventHandler` beans directly (see
+[Scope](#explicitly-out-of-scope-for-this-iteration)).
+
+### Delivery semantics: at-least-once, not exactly-once
+
+`OutboxPublisherScheduler` polls on a fixed delay and hands each `PENDING`
+batch to `OutboxPublisher.publishPendingBatch`, which calls
+`OutboxEventDispatcher.dispatch` for every event and then
+`OutboxService.markPublished` only after every registered
+`OutboxEventHandler` for that event's `event_type` has run. For each
+handler, `OutboxEventDispatcher` wraps a claim insert into
+`outbox_consumed_events` (`(handler_name, event_id)`, unique-constrained —
+`uq_outbox_consumed_events_handler_event`) and the handler's own
+`handle(...)` call in one database transaction. A duplicate-key violation
+on that insert means the handler already consumed this event; it's caught
+and treated as a no-op rather than an error.
+
+Delivery is **at-least-once**. If the process crashes (or a later handler
+in the same dispatch fails) after one handler's claim-and-handle
+transaction has committed but before `markPublished` commits, the event
+row is still `PENDING` and gets redelivered on the next poll. Each
+handler's own claim then hits the unique constraint and is skipped, so
+that handler's registered database effect runs at most once per event —
+but this only protects work done inside the claim's transaction. Any
+side effect a handler performs outside that transaction (e.g. an outbound
+HTTP call) is not covered by the claim and could repeat on redelivery.
+The only handlers registered today (`EventReceiptRecorder`, via
+`OrderCreatedReceiptHandler` / `PaymentAuthorizedReceiptHandler` /
+`PaymentDeclinedReceiptHandler`) insert a row into `outbox_event_receipts`
+inside that same transaction, so they are fully covered by this guarantee.
+
+### Status lifecycle
+
+`outbox_events.status` (`OutboxEventStatus`) is `PENDING`, `PUBLISHED`, or
+`FAILED` (`ck_outbox_events_status` also enforces this at the database
+level). `findPendingBatch` only ever selects `status = 'PENDING'`, so:
+
+- **`PENDING` → `PUBLISHED`** — every handler for the event succeeded;
+  `published_at` is stamped.
+- **`PENDING` → `FAILED`** — `OutboxPublisher.recordFailedAttempt`
+  increments `attempts` and stores the exception's class and message in
+  `last_error` (truncated to 1000 characters, `LAST_ERROR_MAX_LENGTH`) on
+  every failed dispatch; once `attempts` reaches
+  `ledgerflow.outbox.publisher.max-attempts`, the row moves to `FAILED`.
+  Between failures the row stays `PENDING` and is retried on the next
+  poll — the poll interval is the only backoff, there is no separate
+  retry delay.
+- **`FAILED` is terminal.** Because `findPendingBatch` filters on
+  `status = 'PENDING'`, a `FAILED` row is never picked up again on its
+  own. It is kept in the table (never deleted) with its `attempts` and
+  `last_error` for inspection.
+
+Inspect failed rows:
+
+```sql
+SELECT id, event_type, aggregate_id, attempts, last_error, created_at
+FROM outbox_events
+WHERE status = 'FAILED'
+ORDER BY created_at;
+```
+
+Recover one manually by putting it back into the poll query's result set:
+
+```sql
+UPDATE outbox_events
+SET status = 'PENDING', attempts = 0, last_error = NULL
+WHERE id = '<event-id>';
+```
+
+Resetting `status` to `PENDING` is what makes `findPendingBatch` pick the
+row up again; resetting `attempts` to `0` restores its full retry budget
+before it can reach `FAILED` again.
+
+### Configuration
+
+`OutboxProperties`, bound from `ledgerflow.outbox.publisher.*`:
+
+| Property | Type | Default (`application.yml`) | Purpose |
+|---|---|---|---|
+| `ledgerflow.outbox.publisher.enabled` | `boolean` | `true` | Gates `OutboxPublisherScheduler` via `@ConditionalOnProperty` — when `false`, the scheduler bean is never created, not merely a no-op. `application-test.yml` sets this to `false`. |
+| `ledgerflow.outbox.publisher.poll-interval` | `Duration` | `PT1S` | `@Scheduled(fixedDelayString = ...)` delay between the end of one poll and the start of the next. |
+| `ledgerflow.outbox.publisher.batch-size` | `int` | `50` | Rows fetched per poll (`findPendingBatch`'s `LIMIT`). |
+| `ledgerflow.outbox.publisher.max-attempts` | `int` | `5` | Failed dispatch attempts before a row moves to `FAILED`. |
+
+### Scope
+
+Publishing and consuming both happen in-process: `OutboxPublisher` calls
+registered `OutboxEventHandler` beans directly inside the application. There
+is no Kafka or other message broker in front of `outbox_events`, and no
+notification/webhook module consumes these events yet — see [Explicitly
+out of scope for this iteration](#explicitly-out-of-scope-for-this-iteration).
+
 ## Design decisions
 
 - **WebFlux + R2DBC, not MVC + JPA.** The `order` module is built reactively
@@ -690,6 +843,13 @@ implemented.
 ## Explicitly out of scope for this iteration
 
 - Kafka, Redis, Kubernetes, and any frontend — not added yet.
+- An external message broker for the outbox, and any real event consumer.
+  `OutboxPublisher` polls `outbox_events` and dispatches straight to
+  in-process `OutboxEventHandler` beans — no queue or broker sits between
+  them — and the only handlers registered today (`EventReceiptRecorder`
+  and its three per-event-type wrappers) just record a receipt row rather
+  than notifying another service. See [Events and reliable
+  publication](#events-and-reliable-publication).
 - A real payment gateway. `PaymentProvider` has one implementation,
   `FakePaymentProvider`, which returns whichever outcome the caller asks
   for instead of calling an actual processor.
@@ -703,7 +863,7 @@ implemented.
   service is dev-only (`start-dev`, no persistent realm export) and
   requires manual realm/client/user provisioning — see [Trust
   boundaries](#trust-boundaries).
-- The `ledger`, `outbox` and `common` module packages: removed rather than
-  kept as empty scaffolding, since they have no code yet. Re-add them with
-  the same `api`/`service`/`repo`/`model` layout as `order`, `payment` and
-  `idempotency` once they have real behaviour.
+- The `ledger` and `common` module packages: removed rather than kept as
+  empty scaffolding, since they have no code yet. Re-add them with the
+  same layout as `order`, `payment`, `idempotency` and `outbox` once they
+  have real behaviour.

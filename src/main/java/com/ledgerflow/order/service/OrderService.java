@@ -15,6 +15,8 @@ import com.ledgerflow.order.model.entity.OrderEntity;
 import com.ledgerflow.order.model.entity.OrderItemEntity;
 import com.ledgerflow.order.repo.OrderItemRepository;
 import com.ledgerflow.order.repo.OrderRepository;
+import com.ledgerflow.outbox.model.event.OrderCreatedEvent;
+import com.ledgerflow.outbox.service.OutboxService;
 
 import lombok.RequiredArgsConstructor;
 import reactor.core.publisher.Flux;
@@ -26,13 +28,16 @@ public class OrderService {
 
     private final OrderRepository orderRepository;
     private final OrderItemRepository orderItemRepository;
+    private final OutboxService outboxService;
     private final Validator validator;
 
     @Transactional
     public Mono<OrderEntity> save(OrderEntity order) {
+        boolean created = order.isNew();
         return validate(order)
                 .then(Mono.defer(() -> orderRepository.save(order)))
-                .flatMap(saved -> replaceItems(saved, order.getItems()));
+                .flatMap(saved -> replaceItems(saved, order.getItems()))
+                .flatMap(saved -> created ? appendOrderCreated(saved) : Mono.just(saved));
     }
 
     @Transactional
@@ -100,6 +105,17 @@ public class OrderService {
                     savedOrder.setItems(savedItems);
                     return savedOrder;
                 });
+    }
+
+    private Mono<OrderEntity> appendOrderCreated(OrderEntity order) {
+        OrderCreatedEvent event = new OrderCreatedEvent(
+                order.getId(),
+                order.getCustomerId(),
+                order.getTotalAmount(),
+                order.getCurrency(),
+                order.getStatusCode(),
+                order.getCreatedAt());
+        return outboxService.append(event).thenReturn(order);
     }
 
     private Mono<Void> validate(OrderEntity order) {

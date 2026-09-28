@@ -19,3 +19,9 @@ ledgerflow:
     max-poll-attempts: 8
     min-poll-backoff: 50ms
     max-poll-backoff: 1s
+  outbox:
+    publisher:
+      enabled: true
+      poll-interval: PT1S
+      batch-size: 50
+      max-attempts: 5

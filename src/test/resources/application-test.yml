@@ -15,6 +15,9 @@ spring:
 ledgerflow:
   idempotency:
     max-poll-attempts: 15
+  outbox:
+    publisher:
+      enabled: false
 
 logging:
   level:

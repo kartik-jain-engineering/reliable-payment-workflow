@@ -13,6 +13,10 @@ import org.springframework.transaction.annotation.Transactional;
 import com.ledgerflow.order.model.OrderStatus;
 import com.ledgerflow.order.model.entity.OrderEntity;
 import com.ledgerflow.order.service.OrderService;
+import com.ledgerflow.outbox.model.event.DomainEvent;
+import com.ledgerflow.outbox.model.event.PaymentAuthorizedEvent;
+import com.ledgerflow.outbox.model.event.PaymentDeclinedEvent;
+import com.ledgerflow.outbox.service.OutboxService;
 import com.ledgerflow.payment.model.PaymentStatus;
 import com.ledgerflow.payment.model.SimulatedOutcome;
 import com.ledgerflow.payment.model.entity.PaymentEntity;
@@ -31,6 +35,7 @@ public class PaymentService {
     private final PaymentRepository paymentRepository;
     private final OrderService orderService;
     private final PaymentProvider paymentProvider;
+    private final OutboxService outboxService;
     private final Validator validator;
 
     @Transactional
@@ -92,7 +97,29 @@ public class PaymentService {
         order.transitionTo(orderStatus);
 
         return paymentRepository.save(payment)
-                .flatMap(settled -> orderService.save(order).thenReturn(settled));
+                .flatMap(settled -> orderService.save(order).thenReturn(settled))
+                .flatMap(settled -> outboxService.append(settledEvent(settled, order)).thenReturn(settled));
+    }
+
+    private static DomainEvent settledEvent(PaymentEntity payment, OrderEntity order) {
+        if (payment.getStatus() == PaymentStatus.AUTHORIZED) {
+            return new PaymentAuthorizedEvent(
+                    payment.getId(),
+                    payment.getOrderId(),
+                    order.getCustomerId(),
+                    payment.getAmount(),
+                    payment.getCurrency(),
+                    payment.getStatusCode(),
+                    payment.getUpdatedAt());
+        }
+        return new PaymentDeclinedEvent(
+                payment.getId(),
+                payment.getOrderId(),
+                order.getCustomerId(),
+                payment.getAmount(),
+                payment.getCurrency(),
+                payment.getStatusCode(),
+                payment.getUpdatedAt());
     }
 
     private Mono<Void> validate(PaymentEntity payment) {

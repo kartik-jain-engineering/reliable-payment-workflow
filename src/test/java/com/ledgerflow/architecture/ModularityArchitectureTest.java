@@ -12,7 +12,7 @@ import static com.tngtech.archunit.library.dependencies.SlicesRuleDefinition.sli
  * Basic module/layer-boundary checks for the modular monolith.
  *
  * <p>Each top-level package under {@code com.ledgerflow} is a module ({@code order},
- * {@code payment} and {@code idempotency} have real code so far), layered internally as {@code api}
+ * {@code payment}, {@code idempotency} and {@code outbox} have real code so far), layered internally as {@code api}
  * (controllers, request/response mapping) → {@code service} (use cases) →
  * {@code repo} (Spring Data repositories), all depending on {@code model}
  * (entities, DTOs and enums) — dependencies point inward, and {@code model}
@@ -58,6 +58,13 @@ class ModularityArchitectureTest {
             noClasses()
                     .that().resideInAPackage("com.ledgerflow.idempotency..")
                     .should().dependOnClassesThat().resideInAnyPackage("com.ledgerflow.order..", "com.ledgerflow.payment..");
+
+    @ArchTest
+    static final ArchRule outbox_should_not_depend_on_other_modules =
+            noClasses()
+                    .that().resideInAPackage("com.ledgerflow.outbox..")
+                    .should().dependOnClassesThat().resideInAnyPackage(
+                            "com.ledgerflow.order..", "com.ledgerflow.payment..", "com.ledgerflow.idempotency..");
 
     @ArchTest
     static final ArchRule model_should_not_depend_on_spring_web =

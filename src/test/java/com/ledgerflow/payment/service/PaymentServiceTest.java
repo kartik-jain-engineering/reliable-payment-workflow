@@ -18,6 +18,7 @@ import org.mockito.ArgumentCaptor;
 import com.ledgerflow.order.model.OrderStatus;
 import com.ledgerflow.order.model.entity.OrderEntity;
 import com.ledgerflow.order.service.OrderService;
+import com.ledgerflow.outbox.service.OutboxService;
 import com.ledgerflow.payment.model.PaymentStatus;
 import com.ledgerflow.payment.model.SimulatedOutcome;
 import com.ledgerflow.payment.model.entity.PaymentEntity;
@@ -52,7 +53,9 @@ class PaymentServiceTest {
     private final PaymentRepository paymentRepository = mock(PaymentRepository.class);
     private final OrderService orderService = mock(OrderService.class);
     private final PaymentProvider paymentProvider = mock(PaymentProvider.class);
-    private final PaymentService service = new PaymentService(paymentRepository, orderService, paymentProvider, validator);
+    private final OutboxService outboxService = mock(OutboxService.class);
+    private final PaymentService service =
+            new PaymentService(paymentRepository, orderService, paymentProvider, outboxService, validator);
 
     @BeforeAll
     static void setUpValidator() {
@@ -88,6 +91,7 @@ class PaymentServiceTest {
     private void stubEchoOrderSaves() {
         when(orderService.save(any(OrderEntity.class)))
                 .thenAnswer(invocation -> Mono.just(invocation.getArgument(0)));
+        when(outboxService.append(any())).thenReturn(Mono.empty());
     }
 
     // ---------------------------------------------------------------
